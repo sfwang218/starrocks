@@ -73,6 +73,7 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TabletInvertedIndex;
 import com.starrocks.catalog.TabletStatMgr;
 import com.starrocks.catalog.Type;
+import com.starrocks.catalog.constraint.GlobalConstraintManager;
 import com.starrocks.clone.ColocateTableBalancer;
 import com.starrocks.clone.DynamicPartitionScheduler;
 import com.starrocks.clone.TabletChecker;
@@ -101,13 +102,13 @@ import com.starrocks.common.util.concurrent.QueryableReentrantLock;
 import com.starrocks.common.util.concurrent.lock.LockManager;
 import com.starrocks.common.util.concurrent.lock.LockType;
 import com.starrocks.common.util.concurrent.lock.Locker;
-import com.starrocks.connector.ConnectorMetadata;
 import com.starrocks.connector.ConnectorMgr;
 import com.starrocks.connector.ConnectorTblMetaInfoMgr;
 import com.starrocks.connector.elasticsearch.EsRepository;
 import com.starrocks.connector.exception.StarRocksConnectorException;
 import com.starrocks.connector.hive.ConnectorTableMetadataProcessor;
 import com.starrocks.connector.hive.events.MetastoreEventsProcessor;
+import com.starrocks.connector.statistics.ConnectorTableTriggerAnalyzeMgr;
 import com.starrocks.consistency.ConsistencyChecker;
 import com.starrocks.consistency.LockChecker;
 import com.starrocks.consistency.MetaRecoveryDaemon;
@@ -166,6 +167,7 @@ import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.OperationType;
 import com.starrocks.persist.Storage;
 import com.starrocks.persist.gson.GsonUtils;
+import com.starrocks.persist.gson.SubtypeNotFoundException;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockID;
@@ -432,6 +434,7 @@ public class GlobalStateMgr {
     private final CatalogMgr catalogMgr;
     private final ConnectorMgr connectorMgr;
     private final ConnectorTblMetaInfoMgr connectorTblMetaInfoMgr;
+    private ConnectorTableTriggerAnalyzeMgr connectorTableTriggerAnalyzeMgr;
 
     private final TaskManager taskManager;
     private final InsertOverwriteJobMgr insertOverwriteJobMgr;
@@ -490,6 +493,9 @@ public class GlobalStateMgr {
     private TemporaryTableCleaner temporaryTableCleaner;
 
     private final GtidGenerator gtidGenerator;
+    private final GlobalConstraintManager globalConstraintManager;
+
+    private final VariableMgr variableMgr;
 
     private final SqlParser sqlParser;
     private final Analyzer analyzer;
@@ -708,6 +714,7 @@ public class GlobalStateMgr {
         this.connectorTblMetaInfoMgr = new ConnectorTblMetaInfoMgr();
         this.metadataMgr = new MetadataMgr(localMetastore, temporaryTableMgr, connectorMgr, connectorTblMetaInfoMgr);
         this.catalogMgr = new CatalogMgr(connectorMgr);
+        this.connectorTableTriggerAnalyzeMgr = new ConnectorTableTriggerAnalyzeMgr();
 
         this.taskManager = new TaskManager();
         this.insertOverwriteJobMgr = new InsertOverwriteJobMgr();
@@ -733,6 +740,7 @@ public class GlobalStateMgr {
         this.lockManager = new LockManager();
 
         this.gtidGenerator = new GtidGenerator();
+        this.globalConstraintManager = new GlobalConstraintManager();
 
         GlobalStateMgr gsm = this;
         this.execution = new StateChangeExecution() {
@@ -769,6 +777,8 @@ public class GlobalStateMgr {
 
         this.keyMgr = new KeyMgr();
         this.keyRotationDaemon = new KeyRotationDaemon(keyMgr);
+
+        this.variableMgr = new VariableMgr();
 
         nodeMgr.registerLeaderChangeListener(globalSlotProvider::leaderChangeListener);
 
@@ -919,8 +929,8 @@ public class GlobalStateMgr {
         return metadataMgr;
     }
 
-    public ConnectorMetadata getMetadata() {
-        return localMetastore;
+    public ConnectorTableTriggerAnalyzeMgr getConnectorTableTriggerAnalyzeMgr() {
+        return connectorTableTriggerAnalyzeMgr;
     }
 
     @VisibleForTesting
@@ -1019,6 +1029,10 @@ public class GlobalStateMgr {
 
     public GtidGenerator getGtidGenerator() {
         return gtidGenerator;
+    }
+
+    public GlobalConstraintManager getGlobalConstraintManager() {
+        return globalConstraintManager;
     }
 
     // Use tryLock to avoid potential deadlock
@@ -1243,6 +1257,10 @@ public class GlobalStateMgr {
                 editLog.logAddFirstFrontend(self);
             }
 
+            if (Config.bdbje_reset_election_group) {
+                nodeMgr.resetFrontends();
+            }
+
             // MUST set leader ip before starting checkpoint thread.
             // because checkpoint thread need this info to select non-leader FE to push image
             nodeMgr.setLeaderInfo();
@@ -1274,7 +1292,7 @@ public class GlobalStateMgr {
                 // configuration. If it is upgraded from an old version, the original
                 // configuration is retained to avoid system stability problems caused by
                 // changes in concurrency
-                VariableMgr.setSystemVariable(VariableMgr.getDefaultSessionVariable(), new SystemVariable(SetType.GLOBAL,
+                variableMgr.setSystemVariable(variableMgr.getDefaultSessionVariable(), new SystemVariable(SetType.GLOBAL,
                                         SessionVariable.ENABLE_ADAPTIVE_SINK_DOP,
                                         LiteralExpr.create("true", Type.BOOLEAN)),
                             false);
@@ -1288,6 +1306,7 @@ public class GlobalStateMgr {
         }
 
         createBuiltinStorageVolume();
+        resourceGroupMgr.createBuiltinResourceGroupsIfNotExist();
         keyMgr.initDefaultMasterKey();
     }
 
@@ -1390,6 +1409,7 @@ public class GlobalStateMgr {
         }
         temporaryTableCleaner.start();
 
+        connectorTableTriggerAnalyzeMgr.start();
     }
 
     // start threads that should run on all FE
@@ -1477,7 +1497,7 @@ public class GlobalStateMgr {
                     .put(SRMetaBlockID.LOCAL_META_STORE, localMetastore::load)
                     .put(SRMetaBlockID.ALTER_MGR, alterJobMgr::load)
                     .put(SRMetaBlockID.CATALOG_RECYCLE_BIN, recycleBin::load)
-                    .put(SRMetaBlockID.VARIABLE_MGR, VariableMgr::load)
+                    .put(SRMetaBlockID.VARIABLE_MGR, variableMgr::load)
                     .put(SRMetaBlockID.RESOURCE_MGR, resourceMgr::loadResourcesV2)
                     .put(SRMetaBlockID.EXPORT_MGR, exportMgr::loadExportJobV2)
                     .put(SRMetaBlockID.BACKUP_MGR, backupHandler::loadBackupHandlerV2)
@@ -1676,7 +1696,7 @@ public class GlobalStateMgr {
                 localMetastore.save(imageWriter);
                 alterJobMgr.save(imageWriter);
                 recycleBin.save(imageWriter);
-                VariableMgr.save(imageWriter);
+                variableMgr.save(imageWriter);
                 resourceMgr.saveResourcesV2(imageWriter);
                 exportMgr.saveExportJobV2(imageWriter);
                 backupHandler.saveBackupHandlerV2(imageWriter);
@@ -1992,11 +2012,13 @@ public class GlobalStateMgr {
     }
 
     protected boolean canSkipBadReplayedJournal(Throwable t) {
+        // 1. metadata_enable_recovery_mode = true will skip all kind of failure
         if (Config.metadata_enable_recovery_mode) {
             LOG.warn("skip journal load failure because cluster is in recovery mode");
             return true;
         }
 
+        // 2. metadata_journal_skip_bad_journal_ids will skip the failure of specified journal ids
         try {
             for (String idStr : Config.metadata_journal_skip_bad_journal_ids.split(",")) {
                 if (!StringUtils.isEmpty(idStr) && Long.parseLong(idStr) == replayedJournalId.get() + 1) {
@@ -2010,6 +2032,13 @@ public class GlobalStateMgr {
                         Config.metadata_journal_skip_bad_journal_ids, e);
         }
 
+        // 3. ignore_unknown_subtype = true will skip the subtype not found failure which happens on downgrading
+        if (t.getCause() != null && t.getCause() instanceof SubtypeNotFoundException) {
+            LOG.warn("ignore unknown subtype: {}", (((SubtypeNotFoundException) t.getCause()).getSubtype()));
+            return true;
+        }
+
+        // 4. metadata_journal_ignore_replay_failure = true will skip the failure of ignorable operations.
         short opCode = OperationType.OP_INVALID;
         if (t instanceof JournalException) {
             opCode = ((JournalException) t).getOpCode();
@@ -2438,7 +2467,7 @@ public class GlobalStateMgr {
 
             // lock all dbs
             for (Database db : lockedDbMap.values()) {
-                locker.lockDatabase(db, LockType.READ);
+                locker.lockDatabase(db.getId(), LockType.READ);
             }
             LOG.info("acquired all the dbs' read lock.");
 
@@ -2454,7 +2483,7 @@ public class GlobalStateMgr {
         } finally {
             // unlock all
             for (Database db : lockedDbMap.values()) {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
             unlock();
         }
@@ -2591,5 +2620,9 @@ public class GlobalStateMgr {
 
     public MetaRecoveryDaemon getMetaRecoveryDaemon() {
         return metaRecoveryDaemon;
+    }
+
+    public VariableMgr getVariableMgr() {
+        return variableMgr;
     }
 }

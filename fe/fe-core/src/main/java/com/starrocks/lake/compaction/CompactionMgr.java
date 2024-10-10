@@ -16,8 +16,10 @@ package com.starrocks.lake.compaction;
 
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Lists;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.common.Config;
+import com.starrocks.common.Pair;
 import com.starrocks.memory.MemoryTrackable;
 import com.starrocks.persist.ImageWriter;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
@@ -129,8 +131,9 @@ public class CompactionMgr implements MemoryTrackable {
 
     @NotNull
     List<PartitionIdentifier> choosePartitionsToCompact(Set<Long> excludeTables) {
-        List<PartitionStatistics> selection = sorter.sort(selector.select(partitionStatisticsHashMap.values(), excludeTables));
-        return selection.stream().map(PartitionStatistics::getPartition).collect(Collectors.toList());
+        List<PartitionStatisticsSnapshot> selection = sorter.sort(
+                selector.select(partitionStatisticsHashMap.values(), excludeTables));
+        return selection.stream().map(PartitionStatisticsSnapshot::getPartition).collect(Collectors.toList());
     }
 
     @NotNull
@@ -230,5 +233,14 @@ public class CompactionMgr implements MemoryTrackable {
     @Override
     public Map<String, Long> estimateCount() {
         return ImmutableMap.of("PartitionStats", (long) partitionStatisticsHashMap.size());
+    }
+
+    @Override
+    public List<Pair<List<Object>, Long>> getSamples() {
+        List<Object> samples = partitionStatisticsHashMap.values()
+                .stream()
+                .limit(1)
+                .collect(Collectors.toList());
+        return Lists.newArrayList(Pair.create(samples, (long) partitionStatisticsHashMap.size()));
     }
 }

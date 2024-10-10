@@ -88,7 +88,6 @@ import com.starrocks.privilege.RolePrivilegeCollectionV2;
 import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.SqlModeHelper;
-import com.starrocks.qe.VariableMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.sql.ast.ArrayExpr;
@@ -1421,7 +1420,8 @@ public class ExpressionAnalyzer {
             if (funcType.equalsIgnoreCase(FunctionSet.DATABASE) || funcType.equalsIgnoreCase(FunctionSet.SCHEMA)) {
                 node.setType(Type.VARCHAR);
                 node.setStrValue(ClusterNamespace.getNameFromFullName(session.getDatabase()));
-            } else if (funcType.equalsIgnoreCase(FunctionSet.USER)) {
+            } else if (funcType.equalsIgnoreCase(FunctionSet.USER)
+                    || funcType.equalsIgnoreCase(FunctionSet.SESSION_USER)) {
                 node.setType(Type.VARCHAR);
 
                 String user = session.getQualifiedUser();
@@ -1470,7 +1470,7 @@ public class ExpressionAnalyzer {
         @Override
         public Void visitVariableExpr(VariableExpr node, Scope context) {
             try {
-                VariableMgr.fillValue(session.getSessionVariable(), node);
+                GlobalStateMgr.getCurrentState().getVariableMgr().fillValue(session.getSessionVariable(), node);
                 if (!Strings.isNullOrEmpty(node.getName()) &&
                         node.getName().equalsIgnoreCase(SessionVariable.SQL_MODE)) {
                     node.setType(Type.VARCHAR);

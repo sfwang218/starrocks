@@ -66,6 +66,9 @@ import com.starrocks.catalog.MaterializedIndex.IndexExtState;
 import com.starrocks.catalog.MaterializedIndex.IndexState;
 import com.starrocks.catalog.Partition.PartitionState;
 import com.starrocks.catalog.Replica.ReplicaState;
+import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.GlobalConstraintManager;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.clone.TabletChecker;
 import com.starrocks.clone.TabletSchedCtx;
 import com.starrocks.clone.TabletScheduler;
@@ -116,7 +119,7 @@ import com.starrocks.task.AgentTask;
 import com.starrocks.task.AgentTaskExecutor;
 import com.starrocks.task.AgentTaskQueue;
 import com.starrocks.task.DropAutoIncrementMapTask;
-import com.starrocks.task.DropReplicaTask;
+import com.starrocks.task.TabletTaskExecutor;
 import com.starrocks.thrift.TCompressionType;
 import com.starrocks.thrift.TOlapTable;
 import com.starrocks.thrift.TPersistentIndexType;
@@ -128,7 +131,6 @@ import com.starrocks.thrift.TWriteQuorumType;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.collections4.ListUtils;
 import org.apache.commons.collections4.map.CaseInsensitiveMap;
-import org.apache.hadoop.util.ThreadUtil;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.threeten.extra.PeriodDuration;
@@ -192,7 +194,7 @@ public class OlapTable extends Table {
         /* This state means table is updating table meta during alter operation(SCHEMA_CHANGE
          * or ROLLUP).
          * The query plan which is generate during this state is invalid because the meta
-         * during the creation of the logical plan and the physical plan might be inconsistent. 
+         * during the creation of the logical plan and the physical plan might be inconsistent.
         */
         UPDATING_META
     }
@@ -285,6 +287,8 @@ public class OlapTable extends Table {
     protected Map<Long, Long> doubleWritePartitions = new HashMap<>();
 
     // Both the following two flags are used by StarMgrMetaSyncer
+    private long lastCollectProfileTime = 0;
+
     // The flag is used to indicate whether the table shard group has changed.
     public AtomicBoolean isShardGroupChanged = new AtomicBoolean(false);
     // The flag is used to indicate whether the table is doing automatic bucketing.
@@ -568,6 +572,7 @@ public class OlapTable extends Table {
         }
 
         // change name
+        String oldTableName = this.name;
         this.name = newName;
 
         // change single partition name
@@ -587,6 +592,25 @@ public class OlapTable extends Table {
             ExpressionRangePartitionInfo expressionRangePartitionInfo = (ExpressionRangePartitionInfo) partitionInfo;
             Preconditions.checkState(expressionRangePartitionInfo.getPartitionExprsSize() == 1);
             expressionRangePartitionInfo.renameTableName("", newName);
+        }
+
+        if (tableProperty != null) {
+            // renew unique constraints
+            List<UniqueConstraint> tpUniqueConstraints = tableProperty.getUniqueConstraints();
+            if (!CollectionUtils.isEmpty(tpUniqueConstraints)) {
+                for (UniqueConstraint constraint : tpUniqueConstraints) {
+                    constraint.onTableRename(this, oldTableName);
+                }
+                setUniqueConstraints(tpUniqueConstraints);
+            }
+            // renew foreign constraints
+            List<ForeignKeyConstraint> tpForeignConstraints = tableProperty.getForeignKeyConstraints();
+            if (!CollectionUtils.isEmpty(tpForeignConstraints)) {
+                for (ForeignKeyConstraint constraint : tpForeignConstraints) {
+                    constraint.onTableRename(this, oldTableName);
+                }
+                setForeignKeyConstraints(tpForeignConstraints);
+            }
         }
     }
 
@@ -804,6 +828,7 @@ public class OlapTable extends Table {
             }
             indexIdToMeta.put(newIdxId, indexIdToMeta.remove(entry.getKey()));
             indexIdToMeta.get(newIdxId).setIndexIdForRestore(newIdxId);
+            indexIdToMeta.get(newIdxId).setSchemaId(newIdxId);
             indexNameToId.put(entry.getValue(), newIdxId);
         }
 
@@ -933,7 +958,7 @@ public class OlapTable extends Table {
             ColocateTableIndex.GroupId groupId = colocateTableIndex.getGroup(this.id);
             List<List<Long>> backendsPerBucketSeq = colocateTableIndex.getBackendsPerBucketSeq(groupId);
             boolean chooseBackendsArbitrary = backendsPerBucketSeq == null || backendsPerBucketSeq.isEmpty();
-    
+
             if (chooseBackendsArbitrary) {
                 backendsPerBucketSeq = Lists.newArrayList();
             }
@@ -942,7 +967,7 @@ public class OlapTable extends Table {
                 long newTabletId = globalStateMgr.getNextId();
                 LocalTablet newTablet = new LocalTablet(newTabletId);
                 index.addTablet(newTablet, null /* tablet meta */, false/* update inverted index */);
-    
+
                 // replicas
                 List<Long> beIds;
                 if (chooseBackendsArbitrary) {
@@ -980,7 +1005,7 @@ public class OlapTable extends Table {
                 long newTabletId = globalStateMgr.getNextId();
                 LocalTablet newTablet = new LocalTablet(newTabletId);
                 index.addTablet(newTablet, null /* tablet meta */, false/* update inverted index */);
-    
+
                 // replicas
                 List<Long> beIds = GlobalStateMgr.getCurrentState().getNodeMgr()
                         .getClusterInfo().getNodeSelector().seqChooseBackendIds(replicationNum, true, true, getLocation());
@@ -1496,6 +1521,10 @@ public class OlapTable extends Table {
         return partition;
     }
 
+    public Optional<Partition> mayGetPartition(long partitionId) {
+        return Optional.ofNullable(getPartition(partitionId));
+    }
+
     public PhysicalPartition getPhysicalPartition(long physicalPartitionId) {
         Long partitionId = physicalPartitionIdToPartitionId.get(physicalPartitionId);
         if (partitionId == null) {
@@ -1568,6 +1597,16 @@ public class OlapTable extends Table {
     @Override
     public Collection<Partition> getPartitions() {
         return idToPartition.values();
+    }
+
+    /**
+     * Return all visible partitions except shadow partitions.
+     */
+    public List<Partition> getVisiblePartitions() {
+        return nameToPartition.entrySet().stream()
+                .filter(e -> !e.getKey().startsWith(ExpressionRangePartitionInfo.SHADOW_PARTITION_PREFIX))
+                .map(e -> e.getValue())
+                .collect(Collectors.toList());
     }
 
     public List<Partition> getNonEmptyPartitions() {
@@ -2552,6 +2591,23 @@ public class OlapTable extends Table {
         tableProperty.buildMutableBucketNum();
     }
 
+    public Boolean enableLoadProfile() {
+        if (tableProperty != null) {
+            return tableProperty.enableLoadProfile();
+        }
+        return false;
+    }
+
+    public void setEnableLoadProfile(boolean enableLoadProfile) {
+        if (tableProperty == null) {
+            tableProperty = new TableProperty(new HashMap<>());
+        }
+        tableProperty
+                .modifyTableProperties(PropertyAnalyzer.PROPERTIES_ENABLE_LOAD_PROFILE,
+                        Boolean.valueOf(enableLoadProfile).toString());
+        tableProperty.buildEnableLoadProfile();
+    }
+
     public TWriteQuorumType writeQuorum() {
         if (tableProperty != null) {
             return tableProperty.writeQuorum();
@@ -2849,7 +2905,7 @@ public class OlapTable extends Table {
         if (tableProperty == null) {
             return -1;
         }
-        return tableProperty.getCompressionLevel();   
+        return tableProperty.getCompressionLevel();
     }
 
     public void setPartitionLiveNumber(int number) {
@@ -2910,7 +2966,7 @@ public class OlapTable extends Table {
         }
         if (keysType == KeysType.UNIQUE_KEYS || keysType == KeysType.PRIMARY_KEYS) {
             uniqueConstraints.add(
-                    new UniqueConstraint(this, getKeyColumns()
+                    new UniqueConstraint(null, null, null, getKeyColumns()
                             .stream().map(Column::getColumnId).collect(Collectors.toList())));
         }
         if (tableProperty != null && tableProperty.getUniqueConstraints() != null) {
@@ -2996,6 +3052,10 @@ public class OlapTable extends Table {
         analyzePartitionInfo();
         analyzeRollupIndexMeta();
         tryToAssignIndexId();
+
+        // register constraints from global state manager
+        GlobalConstraintManager globalConstraintManager = GlobalStateMgr.getCurrentState().getGlobalConstraintManager();
+        globalConstraintManager.registerConstraint(this);
     }
 
     @Override
@@ -3127,6 +3187,10 @@ public class OlapTable extends Table {
         if (!replay && hasAutoIncrementColumn()) {
             sendDropAutoIncrementMapTask();
         }
+
+        // unregister constraints from global state manager
+        GlobalConstraintManager globalConstraintManager = GlobalStateMgr.getCurrentState().getGlobalConstraintManager();
+        globalConstraintManager.unRegisterConstraint(this);
     }
 
     public void removeTableBinds(boolean isReplay) {
@@ -3140,7 +3204,7 @@ public class OlapTable extends Table {
         removeTableBinds(isReplay);
         removeTabletsFromInvertedIndex();
         if (!isReplay) {
-            deleteAllReplicas();
+            TabletTaskExecutor.deleteAllReplicas(this);
         }
         return true;
     }
@@ -3156,62 +3220,6 @@ public class OlapTable extends Table {
 
     public OptimizeJobV2Builder optimizeTable() {
         return new OptimizeJobV2Builder(this);
-    }
-
-    private void deleteAllReplicas() {
-        HashMap<Long, AgentBatchTask> batchTaskMap = new HashMap<>();
-
-        // drop all replicas
-        for (Partition partition : getAllPartitions()) {
-            for (PhysicalPartition physicalPartition : partition.getSubPartitions()) {
-                List<MaterializedIndex> allIndices = physicalPartition
-                        .getMaterializedIndices(MaterializedIndex.IndexExtState.ALL);
-                for (MaterializedIndex materializedIndex : allIndices) {
-                    long indexId = materializedIndex.getId();
-                    int schemaHash = getSchemaHashByIndexId(indexId);
-                    for (Tablet tablet : materializedIndex.getTablets()) {
-                        long tabletId = tablet.getId();
-                        List<Replica> replicas = ((LocalTablet) tablet).getImmutableReplicas();
-                        for (Replica replica : replicas) {
-                            long backendId = replica.getBackendId();
-                            DropReplicaTask dropTask = new DropReplicaTask(backendId, tabletId, schemaHash, true);
-                            AgentBatchTask batchTask = batchTaskMap.get(backendId);
-                            if (batchTask == null) {
-                                batchTask = new AgentBatchTask();
-                                batchTaskMap.put(backendId, batchTask);
-                            }
-                            batchTask.addTask(dropTask);
-                            LOG.info("delete tablet[{}] from backend[{}] because table {}-{} is dropped",
-                                    tabletId, backendId, getId(), getName());
-                        } // end for replicas
-                    } // end for tablets
-                }
-            } // end for indices
-        } // end for partitions
-
-        int numDropTaskPerBe = Config.max_agent_tasks_send_per_be;
-        for (Map.Entry<Long, AgentBatchTask> entry : batchTaskMap.entrySet()) {
-            AgentBatchTask originTasks = entry.getValue();
-            if (originTasks.getTaskNum() > numDropTaskPerBe) {
-                AgentBatchTask partTask = new AgentBatchTask();
-                List<AgentTask> allTasks = originTasks.getAllTasks();
-                int curTask = 1;
-                for (AgentTask task : allTasks) {
-                    partTask.addTask(task);
-                    if (curTask++ > numDropTaskPerBe) {
-                        AgentTaskExecutor.submit(partTask);
-                        curTask = 1;
-                        partTask = new AgentBatchTask();
-                        ThreadUtil.sleepAtLeastIgnoreInterrupts(1000);
-                    }
-                }
-                if (!partTask.getAllTasks().isEmpty()) {
-                    AgentTaskExecutor.submit(partTask);
-                }
-            } else {
-                AgentTaskExecutor.submit(originTasks);
-            }
-        }
     }
 
     @Override
@@ -3253,6 +3261,12 @@ public class OlapTable extends Table {
             properties.put(PropertyAnalyzer.PROPERTIES_MUTABLE_BUCKET_NUM, mutableBucketNum.toString());
         }
 
+        // enable load profile
+        Boolean enableLoadProfile = enableLoadProfile();
+        if (enableLoadProfile) {
+            properties.put(PropertyAnalyzer.PROPERTIES_ENABLE_LOAD_PROFILE, "true");
+        }
+
         // locations
         Multimap<String, String> locationsMap = getLocation();
         if (locationsMap != null) {
@@ -3276,6 +3290,12 @@ public class OlapTable extends Table {
         String partitionLiveNumber = tableProperties.get(PropertyAnalyzer.PROPERTIES_PARTITION_LIVE_NUMBER);
         if (partitionLiveNumber != null) {
             properties.put(PropertyAnalyzer.PROPERTIES_PARTITION_LIVE_NUMBER, partitionLiveNumber);
+        }
+
+        // partition ttl
+        if (tableProperties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_TTL)) {
+            properties.put(
+                    PropertyAnalyzer.PROPERTIES_PARTITION_TTL, tableProperties.get(PropertyAnalyzer.PROPERTIES_PARTITION_TTL));
         }
 
         // compression type
@@ -3335,17 +3355,15 @@ public class OlapTable extends Table {
             properties.put(PropertyAnalyzer.PROPERTIES_WRITE_QUORUM, WriteQuorum.writeQuorumToName(writeQuorumType));
         }
 
-        // fast schema evolution only when it is set true
+        // fast schema evolution
         boolean useFastSchemaEvolution = getUseFastSchemaEvolution();
-        if (useFastSchemaEvolution) {
-            properties.put(PropertyAnalyzer.PROPERTIES_USE_FAST_SCHEMA_EVOLUTION, "true");
-        }
+        properties.put(PropertyAnalyzer.PROPERTIES_USE_FAST_SCHEMA_EVOLUTION, String.valueOf(useFastSchemaEvolution));
 
         // unique constraint
         String uniqueConstraint = tableProperties.get(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT);
         if (!Strings.isNullOrEmpty(uniqueConstraint)) {
             properties.put(PropertyAnalyzer.PROPERTIES_UNIQUE_CONSTRAINT,
-                    UniqueConstraint.getShowCreateTableConstraintDesc(getTableProperty().getUniqueConstraints()));
+                    UniqueConstraint.getShowCreateTableConstraintDesc(getTableProperty().getUniqueConstraints(), this));
         }
 
         // foreign key constraint
@@ -3529,4 +3547,23 @@ public class OlapTable extends Table {
         }
     }
 
+    public int getPartitionsCount() {
+        return physicalPartitionIdToPartitionId.size();
+    }
+
+    public PhysicalPartition getPartitionSample() {
+        if (!idToPartition.isEmpty()) {
+            return idToPartition.values().iterator().next().getSubPartitions().iterator().next();
+        } else {
+            return null;
+        }
+    }
+
+    public long getLastCollectProfileTime() {
+        return lastCollectProfileTime;
+    }
+
+    public void updateLastCollectProfileTime() {
+        this.lastCollectProfileTime = System.currentTimeMillis();
+    }
 }

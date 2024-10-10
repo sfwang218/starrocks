@@ -1604,6 +1604,10 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
 
     @Override
     public Void visitDescTableStmt(DescribeStmt statement, ConnectContext context) {
+        if (statement.isTableFunctionTable()) {
+            return null;
+        }
+
         try {
             Authorizer.checkAnyActionOnTable(context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
                     statement.getDbTableName());
@@ -2156,7 +2160,7 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
             Locker locker = new Locker();
             if (db != null) {
                 try {
-                    locker.lockDatabase(db, LockType.READ);
+                    locker.lockDatabase(db.getId(), LockType.READ);
                     // check create_table on specified database
                     try {
                         Authorizer.checkDbAction(context.getCurrentUserIdentity(), context.getCurrentRoleIds(),
@@ -2185,7 +2189,7 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
                         }
                     }
                 } finally {
-                    locker.unLockDatabase(db, LockType.READ);
+                    locker.unLockDatabase(db.getId(), LockType.READ);
                 }
             }
         }
@@ -2341,7 +2345,7 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
         if (db != null) {
             Locker locker = new Locker();
             try {
-                locker.lockDatabase(db, LockType.READ);
+                locker.lockDatabase(db.getId(), LockType.READ);
                 Function function = db.getFunction(statement.getFunctionSearchDesc());
                 if (null != function) {
                     try {
@@ -2355,7 +2359,7 @@ public class AuthorizerStmtVisitor implements AstVisitor<Void, ConnectContext> {
                     }
                 }
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
         }
         return null;

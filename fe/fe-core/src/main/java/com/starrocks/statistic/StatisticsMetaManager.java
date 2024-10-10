@@ -68,7 +68,7 @@ public class StatisticsMetaManager extends FrontendDaemon {
         LOG.info("create statistics db start");
         CreateDbStmt dbStmt = new CreateDbStmt(false, StatsConstants.STATISTICS_DB_NAME);
         try {
-            GlobalStateMgr.getCurrentState().getMetadata().createDb(dbStmt.getFullDbName());
+            GlobalStateMgr.getCurrentState().getLocalMetastore().createDb(dbStmt.getFullDbName());
         } catch (UserException e) {
             LOG.warn("Failed to create database ", e);
             return false;
@@ -311,11 +311,9 @@ public class StatisticsMetaManager extends FrontendDaemon {
     private void refreshAnalyzeJob() {
         for (Map.Entry<Long, BasicStatsMeta> entry :
                 GlobalStateMgr.getCurrentState().getAnalyzeMgr().getBasicStatsMetaMap().entrySet()) {
-            BasicStatsMeta basicStatsMeta = entry.getValue();
-            GlobalStateMgr.getCurrentState().getAnalyzeMgr().addBasicStatsMeta(new BasicStatsMeta(
-                    basicStatsMeta.getDbId(), basicStatsMeta.getTableId(), basicStatsMeta.getColumns(),
-                    basicStatsMeta.getType(), LocalDateTime.MIN, basicStatsMeta.getProperties(),
-                    basicStatsMeta.getUpdateRows()));
+            BasicStatsMeta basicStatsMeta = entry.getValue().clone();
+            basicStatsMeta.setUpdateTime(LocalDateTime.MIN);
+            GlobalStateMgr.getCurrentState().getAnalyzeMgr().addBasicStatsMeta(basicStatsMeta);
         }
 
         for (AnalyzeJob analyzeJob : GlobalStateMgr.getCurrentState().getAnalyzeMgr().getAllAnalyzeJobList()) {

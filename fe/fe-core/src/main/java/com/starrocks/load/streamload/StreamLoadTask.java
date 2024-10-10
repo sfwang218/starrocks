@@ -46,10 +46,8 @@ import com.starrocks.load.routineload.RLTaskTxnCommitAttachment;
 import com.starrocks.persist.gson.GsonPostProcessable;
 import com.starrocks.persist.gson.GsonPreProcessable;
 import com.starrocks.persist.gson.GsonUtils;
-import com.starrocks.qe.ConnectContext;
 import com.starrocks.qe.DefaultCoordinator;
 import com.starrocks.qe.QeProcessorImpl;
-import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.scheduler.Coordinator;
 import com.starrocks.rpc.ThriftConnectionPool;
 import com.starrocks.rpc.ThriftRPCRequestExecutor;
@@ -147,6 +145,8 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     private long startPreparingTimeMs;
     @SerializedName(value = "finishPreparingTimeMs")
     private long finishPreparingTimeMs;
+    @SerializedName(value = "commitTimeMs")
+    private long commitTimeMs;
     @SerializedName(value = "endTimeMs")
     private long endTimeMs;
     @SerializedName(value = "txnId")
@@ -618,7 +618,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         boolean exception = false;
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 if (state == State.CANCELLED) {
                     resp.setOKMsg("txn could not be prepared because task state is: " + state
                             + ", error_msg: " + errorMsg);
@@ -690,7 +690,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         boolean exception = false;
         readLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 if (state == State.CANCELLED) {
                     resp.setOKMsg("txn could not be committed because task state is: " + state
                             + ", error_msg: " + errorMsg);
@@ -840,7 +840,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
                 }
 
                 if (coord.isEnableLoadProfile()) {
-                    collectProfile();
+                    collectProfile(false);
                 }
 
                 this.trackingUrl = coord.getTrackingUrl();
@@ -870,7 +870,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         }
         readLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 if (state == State.CANCELLED) {
                     return "cur task state is: " + state
                             + ", error_msg: " + errorMsg;
@@ -958,7 +958,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     public void beforePrepared(TransactionState txnState) throws TransactionException {
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 throw new TransactionException("txn could not be prepared because task state is: " + state);
             }
         } finally {
@@ -1002,7 +1002,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     public void beforeCommitted(TransactionState txnState) throws TransactionException {
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 throw new TransactionException("txn could not be commited because task state is: " + state);
             }
             isCommitting = true;
@@ -1019,7 +1019,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
 
         // sync stream load collect profile, here we collect profile only when be has reported
         if (isSyncStreamLoad() && coord != null && coord.isProfileAlreadyReported()) {
-            collectProfile();
+            collectProfile(false);
         }
 
         writeLock();
@@ -1028,8 +1028,8 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
                 this.channels.set(i, State.COMMITED);
             }
             this.state = State.COMMITED;
+            commitTimeMs = System.currentTimeMillis();
             isCommitting = false;
-            endTimeMs = System.currentTimeMillis();
         } finally {
             writeUnlock();
             // sync stream load related query info should unregister here
@@ -1037,31 +1037,24 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         }
     }
 
-    public void collectProfile() {
-        long currentTimestamp = System.currentTimeMillis();
-        long totalTimeMs = currentTimestamp - createTimeMs;
-
-        // For the usage scenarios of flink cdc or routine load,
-        // the frequency of stream load maybe very high, resulting in many profiles,
-        // but we may only care about the long-duration stream load profile.
-        if (totalTimeMs < Config.stream_load_profile_collect_second * 1000) {
-            LOG.info(String.format("Load %s, totalTimeMs %d < Config.stream_load_profile_collect_second %d)",
-                    label, totalTimeMs, Config.stream_load_profile_collect_second));
-            return;
-        }
-
+    public RuntimeProfile buildTopLevelProfile(boolean isAborted) {
         RuntimeProfile profile = new RuntimeProfile("Load");
         RuntimeProfile summaryProfile = new RuntimeProfile("Summary");
         summaryProfile.addInfoString(ProfileManager.QUERY_ID, DebugUtil.printId(loadId));
         summaryProfile.addInfoString(ProfileManager.START_TIME,
                 TimeUtils.longToTimeString(createTimeMs));
 
-        summaryProfile.addInfoString(ProfileManager.END_TIME, TimeUtils.longToTimeString(System.currentTimeMillis()));
+        long currentTimestamp = System.currentTimeMillis();
+        long totalTimeMs = currentTimestamp - createTimeMs;
+        summaryProfile.addInfoString(ProfileManager.END_TIME, TimeUtils.longToTimeString(currentTimestamp));
         summaryProfile.addInfoString(ProfileManager.TOTAL_TIME, DebugUtil.getPrettyStringMs(totalTimeMs));
 
         summaryProfile.addInfoString(ProfileManager.QUERY_TYPE, "Load");
+        summaryProfile.addInfoString(ProfileManager.LOAD_TYPE, getStringByType());
+        summaryProfile.addInfoString(ProfileManager.QUERY_STATE, isAborted ? "Aborted" : "Finished");
         summaryProfile.addInfoString("StarRocks Version",
                 String.format("%s-%s", Version.STARROCKS_VERSION, Version.STARROCKS_COMMIT_HASH));
+        summaryProfile.addInfoString(ProfileManager.SQL_STATEMENT, getStmt());
         summaryProfile.addInfoString(ProfileManager.DEFAULT_DB, dbName);
 
         Map<String, String> loadCounters = coord.getLoadCounters();
@@ -1071,19 +1064,20 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
             summaryProfile.addInfoString("NumRowsAbnormal", loadCounters.get(LoadEtlTask.DPP_ABNORMAL_ALL));
             summaryProfile.addInfoString("numRowsUnselected", loadCounters.get(LoadJob.UNSELECTED_ROWS));
         }
-        ConnectContext session = ConnectContext.get();
-        if (session != null) {
-            SessionVariable variables = session.getSessionVariable();
-            if (variables != null) {
-                summaryProfile.addInfoString("NonDefaultSessionVariables", variables.getNonDefaultVariablesJson());
-            }
-        }
 
         profile.addChild(summaryProfile);
+
+        return profile;
+    }
+
+
+    public void collectProfile(boolean isAborted) {
+        RuntimeProfile profile = buildTopLevelProfile(isAborted);
+
         if (coord.getQueryProfile() != null) {
             if (!isSyncStreamLoad()) {
                 coord.collectProfileSync();
-                profile.addChild(coord.buildQueryProfile(session == null || session.needMergeProfile()));
+                profile.addChild(coord.buildQueryProfile(true));
             } else {
                 profile.addChild(coord.getQueryProfile());
             }
@@ -1126,8 +1120,8 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
                 this.channels.set(i, State.COMMITED);
             }
             this.state = State.COMMITED;
+            commitTimeMs = txnState.getCommitTime();
             this.preparedChannelNum = this.channelNum;
-            this.endTimeMs = txnState.getCommitTime();
         } finally {
             writeUnlock();
         }
@@ -1140,9 +1134,13 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
             return;
         }
 
+        if (isSyncStreamLoad() && coord != null && coord.isProfileAlreadyReported()) {
+            collectProfile(true);
+        }
+
         writeLock();
         try {
-            if (isFinalState()) {
+            if (isUnreversibleState()) {
                 return;
             }
             if (coord != null && !isSyncStreamLoad) {
@@ -1259,7 +1257,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
             throw new MetaNotFoundException("Database " + dbId + "has been deleted");
         }
         Locker locker = new Locker();
-        locker.lockDatabase(db, LockType.READ);
+        locker.lockDatabase(db.getId(), LockType.READ);
         try {
             OlapTable table = (OlapTable) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getId(), tableId);
             if (table == null) {
@@ -1267,7 +1265,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
             }
             return table;
         } finally {
-            locker.unLockDatabase(db, LockType.READ);
+            locker.unLockDatabase(db.getId(), LockType.READ);
         }
     }
 
@@ -1283,11 +1281,19 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         return createTimeMs;
     }
 
+    public long commitTimeMs() {
+        return commitTimeMs;
+    }
+
     public long endTimeMs() {
         return endTimeMs;
     }
 
     public boolean isFinalState() {
+        return state == State.CANCELLED || state == State.FINISHED;
+    }
+
+    public boolean isUnreversibleState() {
         return state == State.CANCELLED || state == State.COMMITED || state == State.FINISHED;
     }
 
@@ -1347,8 +1353,16 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
         return isSyncStreamLoad;
     }
 
+    public boolean setIsSyncStreamLoad(boolean isSyncStreamLoad) {
+        return this.isSyncStreamLoad = isSyncStreamLoad;
+    }
+
     public boolean isRoutineLoadTask() {
         return type == Type.ROUTINE_LOAD;
+    }
+
+    public String getStmt() {
+        return "";
     }
 
     // for sync stream load
@@ -1359,9 +1373,9 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
     public String getStringByType() {
         switch (this.type) {
             case ROUTINE_LOAD:
-                return "ROUTINE_LOAD";
+                return ProfileManager.LOAD_TYPE_ROUTINE_LOAD;
             case STREAM_LOAD:
-                return "STREAM_LOAD";
+                return ProfileManager.LOAD_TYPE_STREAM_LOAD;
             case PARALLEL_STREAM_LOAD:
                 return "PARALLEL_STREAM_LOAD";
             default:
@@ -1507,7 +1521,9 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
             } else {
                 info.setProgress("0%");
             }
-
+            if (ProfileManager.getInstance().hasProfile(DebugUtil.printId(loadId))) {
+                info.setProfile_id(DebugUtil.printId(loadId));
+            }
             // tracking url
             if (trackingUrl != null) {
                 info.setUrl(trackingUrl);
@@ -1522,7 +1538,7 @@ public class StreamLoadTask extends AbstractTxnStateChangeCallback
 
             info.setCreate_time(TimeUtils.longToTimeString(createTimeMs));
             info.setLoad_start_time(TimeUtils.longToTimeString(startLoadingTimeMs));
-            info.setLoad_commit_time(TimeUtils.longToTimeString(finishPreparingTimeMs));
+            info.setLoad_commit_time(TimeUtils.longToTimeString(commitTimeMs));
             info.setLoad_finish_time(TimeUtils.longToTimeString(endTimeMs));
 
             info.setType(getStringByType());

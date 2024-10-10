@@ -307,6 +307,9 @@ public class ConnectProcessor {
         boolean onlySetStmt = true;
         try {
             ctx.setQueryId(UUIDUtil.genUUID());
+            if (Config.enable_print_sql) {
+                LOG.info("Begin to execute sql, type: query，query id:{}, sql:{}", ctx.getQueryId(), originStmt);
+            }
             List<StatementBase> stmts;
             try (Timer ignored = Tracers.watchScope(Tracers.Module.PARSER, "Parser")) {
                 stmts = com.starrocks.sql.parser.SqlParser.parse(originStmt, ctx.getSessionVariable());
@@ -418,7 +421,7 @@ public class ConnectProcessor {
             return;
         }
         Locker locker = new Locker();
-        locker.lockDatabase(db, LockType.READ);
+        locker.lockDatabase(db.getId(), LockType.READ);
         try {
             // we should get table through metadata manager
             Table table = ctx.getGlobalStateMgr().getMetadataMgr().getTable(
@@ -442,7 +445,7 @@ public class ConnectProcessor {
         } catch (StarRocksConnectorException e) {
             LOG.error("errors happened when getting table {}", tableName, e);
         } finally {
-            locker.unLockDatabase(db, LockType.READ);
+            locker.unLockDatabase(db.getId(), LockType.READ);
         }
         ctx.getState().setEof();
     }

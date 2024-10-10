@@ -4,6 +4,8 @@ displayed_sidebar: docs
 
 import BEConfigMethod from '../../_assets/commonMarkdown/BE_config_method.md'
 
+import CNConfigMethod from '../../_assets/commonMarkdown/CN_config_method.md'
+
 import PostBEConfig from '../../_assets/commonMarkdown/BE_dynamic_note.md'
 
 import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_note.md'
@@ -11,6 +13,8 @@ import StaticBEConfigNote from '../../_assets/commonMarkdown/StaticBE_config_not
 # BE Configuration
 
 <BEConfigMethod />
+
+<CNConfigMethod />
 
 
 ## View BE configuration items
@@ -3238,23 +3242,41 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Description: The proportion of columns with the same name for Flat JSON. Extraction is not performed if the proportion of columns with the same name is lower than this value. This parameter takes effect only when `enable_json_flat` is set to `true`.
 - Introduced in: v3.3.0
 
-##### json_flat_internal_column_min_limit
-
-- Default: 5
-- Type: Int
-- Unit:
-- Is mutable: Yes
-- Description: The minimum number of JSON fields for performing Flat JSON. Flat JSON is not performed if the number of JSON fields is less than this value. This parameter takes effect only when `enable_json_flat` is set to `true`.
-- Introduced in: v3.3.0
-
 ##### json_flat_column_max
 
-- Default: 20
+- Default: 100
 - Type: Int
 - Unit:
 - Is mutable: Yes
 - Description: The maximum number of sub-fields that can be extracted by Flat JSON. This parameter takes effect only when `enable_json_flat` is set to `true`.
 - Introduced in: v3.3.0
+
+##### enable_compaction_flat_json
+
+- Default: True
+- Type: Boolean
+- Unit:
+- Is mutable: Yes
+- Description: Whether to enable compaction for Flat JSON data.
+- Introduced in: v3.3.3
+
+##### enable_lazy_dynamic_flat_json
+
+- Default: True
+- Type: Boolean
+- Unit:
+- Is mutable: Yes
+- Description: Whether to enable Lazy Dyamic Flat JSON when a query misses Flat JSON schema in read process. When this item is set to `true`, StarRocks will postpone the Flat JSON operation to calculation process instead of read process.
+- Introduced in: v3.3.3
+
+##### jit_lru_cache_size
+
+- Default: 0
+- Type: Int
+- Unit: GB
+- Is mutable: Yes
+- Description: The LRU cache size for JIT compilation. It represents the actual size of the cache if it is set to greater than 0. If it is set to less than or equal to 0, the system will adaptively set the cache using the formula `jit_lru_cache_size = min(mem_limit*0.01, 1GB)` (while `mem_limit` of the node must be greater or equal to 16 GB).
+- Introduced in: -
 
 ### Shared-data
 
@@ -3990,6 +4012,33 @@ When this value is set to less than `0`, the system uses the product of its abso
 - Description: The minimum effective capacity for Data Cache Automatic Scaling. If the system tries to adjust the cache capacity to less than this value, the cache capacity will be directly set to `0` to prevent suboptimal performance caused by frequent cache fills and evictions due to insufficient cache capacity.
 - Introduced in: v3.3.0
 
+##### datacache_block_buffer_enable
+
+- Default: true
+- Type: Boolean
+- Unit: -
+- Is mutable: No
+- Description: Whether to enable Block Buffer to optimize Data Cache efficiency. When Block Buffer is enabled, the system reads the Block data from the Data Cache and caches it in a temporary buffer, thus reducing the extra overhead caused by frequent cache reads.
+- Introduced in: v3.2.0
+
+##### datacache_tiered_cache_enable
+
+- Default: true
+- Type: Boolean
+- Unit: -
+- Is mutable: No
+- Description: Whether to enable tiered cache mode for Data Cache. When tiered cache mode is enabled, Data Cache is configured with two layers of caching, memory and disk. When disk data becomes hot data, it is automatically loaded into the memory cache, and when the data in the memory cache becomes cold, it is automatically flushed to disk. When tiered cache mode is not enabled, the memory and disk configured for Data Cache form two separate cache spaces and cache different types of data, with no data flow between them.
+- Introduced in: v3.2.5
+
+##### query_max_memory_limit_percent
+
+- Default: 90
+- Type: Int
+- Unit: -
+- Is mutable: No
+- Description: The maximum memory that the Query Pool can use. It is expressed as a percentage of the Process memory limit.
+- Introduced in: v3.1.0
+
 <!--
 ##### datacache_block_size
 
@@ -4559,61 +4608,6 @@ When this value is set to less than `0`, the system uses the product of its abso
 -->
 
 <!--
-##### enable_json_flat
-
-- Default: true
-- Type: Boolean
-- Unit: -
-- Is mutable: Yes
-- Description:
-- Introduced in: -
--->
-
-<!--
-##### json_flat_null_factor
-
-- Default: 0.3
-- Type: Double
-- Unit:
-- Is mutable: Yes
-- Description:
-- Introduced in: -
--->
-
-<!--
-##### json_flat_sparsity_factor
-
-- Default: 0.9
-- Type: Double
-- Unit:
-- Is mutable: Yes
-- Description:
-- Introduced in: -
--->
-
-<!--
-##### json_flat_internal_column_min_limit
-
-- Default: 5
-- Type: Int
-- Unit:
-- Is mutable: Yes
-- Description:
-- Introduced in: -
--->
-
-<!--
-##### json_flat_column_max
-
-- Default: 20
-- Type: Int
-- Unit:
-- Is mutable: Yes
-- Description:
-- Introduced in: -
--->
-
-<!--
 ##### pk_dump_interval_seconds
 
 - Default: 3600
@@ -4639,17 +4633,6 @@ When this value is set to less than `0`, the system uses the product of its abso
 ##### olap_string_max_length
 
 - Default: 1048576
-- Type: Int
-- Unit:
-- Is mutable: Yes
-- Description:
-- Introduced in: -
--->
-
-<!--
-##### jit_lru_cache_size
-
-- Default: 0
 - Type: Int
 - Unit:
 - Is mutable: Yes

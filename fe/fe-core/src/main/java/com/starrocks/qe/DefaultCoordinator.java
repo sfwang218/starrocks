@@ -41,9 +41,11 @@ import com.google.common.collect.Sets;
 import com.starrocks.analysis.DescriptorTable;
 import com.starrocks.authentication.AuthenticationMgr;
 import com.starrocks.catalog.FsBroker;
+import com.starrocks.catalog.ResourceGroup;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.FeConstants;
+import com.starrocks.common.InternalErrorCode;
 import com.starrocks.common.Status;
 import com.starrocks.common.ThriftServer;
 import com.starrocks.common.UserException;
@@ -56,6 +58,7 @@ import com.starrocks.connector.exception.RemoteFileNotFoundException;
 import com.starrocks.datacache.DataCacheSelectMetrics;
 import com.starrocks.mysql.MysqlCommand;
 import com.starrocks.planner.PlanFragment;
+import com.starrocks.planner.PlanFragmentId;
 import com.starrocks.planner.ResultSink;
 import com.starrocks.planner.RuntimeFilterDescription;
 import com.starrocks.planner.ScanNode;
@@ -74,6 +77,7 @@ import com.starrocks.qe.scheduler.dag.FragmentInstance;
 import com.starrocks.qe.scheduler.dag.FragmentInstanceExecState;
 import com.starrocks.qe.scheduler.dag.JobSpec;
 import com.starrocks.qe.scheduler.dag.PhasedExecutionSchedule;
+import com.starrocks.qe.scheduler.slot.DeployState;
 import com.starrocks.qe.scheduler.slot.LogicalSlot;
 import com.starrocks.rpc.RpcException;
 import com.starrocks.server.GlobalStateMgr;
@@ -82,6 +86,7 @@ import com.starrocks.sql.ast.UserIdentity;
 import com.starrocks.sql.plan.ExecPlan;
 import com.starrocks.system.ComputeNode;
 import com.starrocks.thrift.TDescriptorTable;
+import com.starrocks.thrift.TExecPlanFragmentParams;
 import com.starrocks.thrift.TLoadJobType;
 import com.starrocks.thrift.TNetworkAddress;
 import com.starrocks.thrift.TQueryType;
@@ -101,6 +106,7 @@ import org.apache.logging.log4j.Logger;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -478,6 +484,12 @@ public class DefaultCoordinator extends Coordinator {
             jobSpec.getFragments().forEach(fragment -> fragment.limitMaxPipelineDop(slot.getPipelineDop()));
         }
 
+        if (connectContext != null) {
+            if (connectContext.getSessionVariable().isEnableConnectorIncrementalScanRanges()) {
+                jobSpec.setIncrementalScanRanges(true);
+            }
+        }
+
         coordinatorPreprocessor.prepareExec();
 
         prepareResultSink();
@@ -595,14 +607,6 @@ public class DefaultCoordinator extends Coordinator {
         setGlobalRuntimeFilterParams(rootExecFragment, worker.getBrpcIpAddress());
         boolean isLoadType = !(rootExecFragment.getPlanFragment().getSink() instanceof ResultSink);
         if (isLoadType) {
-            // TODO (by satanson): Other DataSink except ResultSink can not support global
-            //  runtime filter merging at present, we should support it in future.
-            // pipeline-level runtime filter needs to derive RuntimeFilterLayout, so we collect
-            // RuntimeFilterDescription
-            for (ExecutionFragment execFragment : executionDAG.getFragmentsInPreorder()) {
-                PlanFragment fragment = execFragment.getPlanFragment();
-                fragment.collectBuildRuntimeFilters(fragment.getPlanRoot());
-            }
             return;
         }
 
@@ -636,12 +640,67 @@ public class DefaultCoordinator extends Coordinator {
             Deployer deployer =
                     new Deployer(connectContext, jobSpec, executionDAG, coordinatorPreprocessor.getCoordAddress(),
                             this::handleErrorExecution, needDeploy);
-            schedule.prepareSchedule(deployer, executionDAG);
+            schedule.prepareSchedule(this, deployer, executionDAG);
             this.schedule.schedule();
             queryProfile.attachExecutionProfiles(executionDAG.getExecutions());
         } finally {
             unlock();
         }
+    }
+
+    @Override
+    public List<DeployState> assignIncrementalScanRangesToDeployStates(Deployer deployer, List<DeployState> deployStates)
+            throws UserException {
+        List<DeployState> updatedStates = new ArrayList<>();
+        if (!jobSpec.isIncrementalScanRanges()) {
+            return updatedStates;
+        }
+        for (DeployState state : deployStates) {
+
+            Set<PlanFragmentId> planFragmentIds = new HashSet<>();
+            for (List<FragmentInstanceExecState> fragmentInstanceExecStates : state.getThreeStageExecutionsToDeploy()) {
+                for (FragmentInstanceExecState execState : fragmentInstanceExecStates) {
+                    planFragmentIds.add(execState.getFragmentId());
+                }
+            }
+
+            Set<PlanFragmentId> updatedPlanFragmentIds = new HashSet<>();
+            for (PlanFragmentId fragmentId : planFragmentIds) {
+                boolean hasMoreScanRanges = false;
+                ExecutionFragment fragment = executionDAG.getFragment(fragmentId);
+                for (ScanNode scanNode : fragment.getScanNodes()) {
+                    if (scanNode.hasMoreScanRanges()) {
+                        hasMoreScanRanges = true;
+                    }
+                }
+                if (hasMoreScanRanges) {
+                    coordinatorPreprocessor.assignIncrementalScanRangesToFragmentInstances(fragment);
+                    updatedPlanFragmentIds.add(fragmentId);
+                }
+            }
+
+            if (updatedPlanFragmentIds.isEmpty()) {
+                continue;
+            }
+
+            DeployState newState = new DeployState();
+            updatedStates.add(newState);
+            int index = 0;
+            for (List<FragmentInstanceExecState> fragmentInstanceExecStates : state.getThreeStageExecutionsToDeploy()) {
+                List<FragmentInstanceExecState> res = newState.getThreeStageExecutionsToDeploy().get(index);
+                index += 1;
+                for (FragmentInstanceExecState execState : fragmentInstanceExecStates) {
+                    if (!updatedPlanFragmentIds.contains(execState.getFragmentId())) {
+                        continue;
+                    }
+                    FragmentInstance instance = execState.getFragmentInstance();
+                    TExecPlanFragmentParams request = deployer.createIncrementalScanRangesRequest(instance);
+                    execState.setRequestToDeploy(request);
+                    res.add(execState);
+                }
+            }
+        }
+        return updatedStates;
     }
 
     private void handleErrorExecution(Status status, FragmentInstanceExecState execution, Throwable failure)
@@ -703,8 +762,6 @@ public class DefaultCoordinator extends Coordinator {
 
         for (ExecutionFragment execFragment : executionDAG.getFragmentsInPreorder()) {
             PlanFragment fragment = execFragment.getPlanFragment();
-            fragment.collectBuildRuntimeFilters(fragment.getPlanRoot());
-            fragment.collectProbeRuntimeFilters(fragment.getPlanRoot());
             for (Map.Entry<Integer, RuntimeFilterDescription> kv : fragment.getProbeRuntimeFilters().entrySet()) {
                 List<TRuntimeFilterProberParams> probeParamList = Lists.newArrayList();
                 for (final FragmentInstance instance : execFragment.getInstances()) {
@@ -845,7 +902,12 @@ public class DefaultCoordinator extends Coordinator {
                 if (hostIndex != -1) {
                     errMsg = errMsg.substring(0, hostIndex);
                 }
-                throw new UserException(errMsg);
+                InternalErrorCode ec = InternalErrorCode.INTERNAL_ERR;
+                if (copyStatus.isCancelled() &&
+                        copyStatus.getErrorMsg().equals(FeConstants.BACKEND_NODE_NOT_FOUND_ERROR)) {
+                    ec = InternalErrorCode.CANCEL_NODE_NOT_ALIVE_ERR;
+                }
+                throw new UserException(ec, errMsg);
             }
         }
 
@@ -1220,6 +1282,12 @@ public class DefaultCoordinator extends Coordinator {
             return "";
         }
         return connectContext.getSessionVariable().getWarehouseName();
+    }
+
+    @Override
+    public String getResourceGroupName() {
+        return jobSpec.getResourceGroup() == null ? ResourceGroup.DEFAULT_RESOURCE_GROUP_NAME :
+                jobSpec.getResourceGroup().getName();
     }
 
     private void execShortCircuit() throws Exception {

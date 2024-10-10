@@ -94,7 +94,6 @@ import com.starrocks.qe.ConnectProcessor;
 import com.starrocks.qe.DefaultCoordinator;
 import com.starrocks.qe.SessionVariable;
 import com.starrocks.qe.StmtExecutor;
-import com.starrocks.qe.VariableMgr;
 import com.starrocks.rpc.ThriftConnectionPool;
 import com.starrocks.server.CatalogMgr;
 import com.starrocks.server.GlobalStateMgr;
@@ -1024,7 +1023,7 @@ public class UtFrameUtils {
         }
         for (Database db : dbs.values()) {
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockDatabase(db.getId(), LockType.READ);
         }
     }
 
@@ -1035,7 +1034,7 @@ public class UtFrameUtils {
         }
         for (Database db : dbs.values()) {
             Locker locker = new Locker();
-            locker.unLockDatabase(db, LockType.READ);
+            locker.unLockDatabase(db.getId(), LockType.READ);
         }
     }
 
@@ -1368,7 +1367,7 @@ public class UtFrameUtils {
                     clonedSessionVariable = (SessionVariable) context.getSessionVariable().clone();
                 }
                 for (Map.Entry<String, String> entry : hint.getValue().entrySet()) {
-                    VariableMgr.setSystemVariable(clonedSessionVariable,
+                    GlobalStateMgr.getCurrentState().getVariableMgr().setSystemVariable(clonedSessionVariable,
                                 new SystemVariable(entry.getKey(), new StringLiteral(entry.getValue())), true);
                 }
             } else if (hint instanceof UserVariableHint) {

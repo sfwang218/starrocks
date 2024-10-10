@@ -53,7 +53,6 @@ import com.starrocks.catalog.Column;
 import com.starrocks.catalog.ColumnId;
 import com.starrocks.catalog.DataProperty;
 import com.starrocks.catalog.Database;
-import com.starrocks.catalog.ForeignKeyConstraint;
 import com.starrocks.catalog.InternalCatalog;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.MaterializedView;
@@ -62,7 +61,8 @@ import com.starrocks.catalog.Partition;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableProperty;
 import com.starrocks.catalog.Type;
-import com.starrocks.catalog.UniqueConstraint;
+import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
@@ -72,7 +72,6 @@ import com.starrocks.common.FeConstants;
 import com.starrocks.common.Pair;
 import com.starrocks.lake.DataCacheInfo;
 import com.starrocks.qe.ConnectContext;
-import com.starrocks.qe.VariableMgr;
 import com.starrocks.server.GlobalStateMgr;
 import com.starrocks.server.RunMode;
 import com.starrocks.server.StorageVolumeMgr;
@@ -170,6 +169,8 @@ public class PropertyAnalyzer {
     public static final String PROPERTIES_BUCKET_SIZE = "bucket_size";
 
     public static final String PROPERTIES_MUTABLE_BUCKET_NUM = "mutable_bucket_num";
+
+    public static final String PROPERTIES_ENABLE_LOAD_PROFILE = "enable_load_profile";
 
     public static final String PROPERTIES_PRIMARY_INDEX_CACHE_EXPIRE_SEC = "primary_index_cache_expire_sec";
 
@@ -378,7 +379,7 @@ public class PropertyAnalyzer {
         return partitionTimeToLive;
     }
 
-    public static Pair<String, PeriodDuration> analyzePartitionTTL(Map<String, String> properties) {
+    public static Pair<String, PeriodDuration> analyzePartitionTTL(Map<String, String> properties, boolean removeProperties) {
         if (properties != null && properties.containsKey(PROPERTIES_PARTITION_TTL)) {
             String ttlStr = properties.get(PROPERTIES_PARTITION_TTL);
             PeriodDuration duration;
@@ -387,7 +388,9 @@ public class PropertyAnalyzer {
             } catch (NumberFormatException e) {
                 throw new SemanticException(String.format("illegal %s: %s", PROPERTIES_PARTITION_TTL, e.getMessage()));
             }
-            properties.remove(PROPERTIES_PARTITION_TTL);
+            if (removeProperties) {
+                properties.remove(PROPERTIES_PARTITION_TTL);
+            }
             return Pair.create(ttlStr, duration);
         }
         return Pair.create(null, PeriodDuration.ZERO);
@@ -443,6 +446,14 @@ public class PropertyAnalyzer {
         } else {
             throw new SemanticException("Mutable bucket num is not set");
         }
+    }
+
+    public static boolean analyzeEnableLoadProfile(Map<String, String> properties) {
+        boolean enableLoadProfile = false;
+        if (properties != null && properties.containsKey(PROPERTIES_ENABLE_LOAD_PROFILE)) {
+            enableLoadProfile = Boolean.parseBoolean(properties.get(PROPERTIES_ENABLE_LOAD_PROFILE));
+        }
+        return enableLoadProfile;
     }
 
     public static int analyzeAutoRefreshPartitionsLimit(Map<String, String> properties, MaterializedView mv) {
@@ -1396,7 +1407,7 @@ public class PropertyAnalyzer {
                             + " is only supported by partitioned materialized-view");
                 }
 
-                Pair<String, PeriodDuration> ttlDuration = PropertyAnalyzer.analyzePartitionTTL(properties);
+                Pair<String, PeriodDuration> ttlDuration = PropertyAnalyzer.analyzePartitionTTL(properties, true);
                 materializedView.getTableProperty().getProperties()
                         .put(PropertyAnalyzer.PROPERTIES_PARTITION_TTL, ttlDuration.first);
                 materializedView.getTableProperty().setPartitionTTL(ttlDuration.second);
@@ -1588,7 +1599,7 @@ public class PropertyAnalyzer {
                 List<SetListItem> setListItems = Lists.newArrayList();
                 for (Map.Entry<String, String> entry : properties.entrySet()) {
                     SystemVariable variable = getMVSystemVariable(properties, entry);
-                    VariableMgr.checkSystemVariableExist(variable);
+                    GlobalStateMgr.getCurrentState().getVariableMgr().checkSystemVariableExist(variable);
                     setListItems.add(variable);
                 }
                 SetStmtAnalyzer.analyze(new SetStmt(setListItems), null);

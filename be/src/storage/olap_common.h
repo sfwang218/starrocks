@@ -149,10 +149,11 @@ enum ReaderType {
     READER_BASE_COMPACTION = 2,
     READER_CUMULATIVE_COMPACTION = 3,
     READER_CHECKSUM = 4,
+    READER_BYPASS_QUERY = 5,
 };
 
 inline bool is_query(ReaderType reader_type) {
-    return reader_type == READER_QUERY;
+    return reader_type == READER_QUERY || reader_type == READER_BYPASS_QUERY;
 }
 
 inline bool is_compaction(ReaderType reader_type) {
@@ -253,6 +254,7 @@ struct OlapReaderStatistics {
     int64_t rows_after_key_range = 0;
     int64_t rows_key_range_num = 0;
     int64_t rows_stats_filtered = 0;
+    int64_t rows_vector_index_filtered = 0;
     int64_t rows_bf_filtered = 0;
     int64_t rows_del_filtered = 0;
     int64_t del_filter_ns = 0;
@@ -262,6 +264,9 @@ struct OlapReaderStatistics {
 
     int64_t rows_bitmap_index_filtered = 0;
     int64_t bitmap_index_filter_timer = 0;
+    int64_t get_row_ranges_by_vector_index_timer = 0;
+    int64_t vector_search_timer = 0;
+    int64_t process_vector_distance_and_id_timer = 0;
 
     int64_t rows_del_vec_filtered = 0;
 

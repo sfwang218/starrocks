@@ -44,7 +44,10 @@ import com.google.common.collect.Multimap;
 import com.google.gson.annotations.SerializedName;
 import com.starrocks.analysis.TableName;
 import com.starrocks.binlog.BinlogConfig;
+import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.Config;
+import com.starrocks.common.Pair;
 import com.starrocks.common.io.Text;
 import com.starrocks.common.io.Writable;
 import com.starrocks.common.util.PropertyAnalyzer;
@@ -262,6 +265,8 @@ public class TableProperty implements Writable, GsonPostProcessable {
     // the default mutable bucket number
     private long mutableBucketNum = 0;
 
+    private boolean enableLoadProfile = false;
+
     // 1. This table has been deleted. if hasDelete is false, the BE segment must don't have deleteConditions.
     //    If hasDelete is true, the BE segment maybe have deleteConditions because compaction.
     // 2. Before checkpoint, we relay delete job journal log to persist.
@@ -358,6 +363,9 @@ public class TableProperty implements Writable, GsonPostProcessable {
             case OperationType.OP_MODIFY_MUTABLE_BUCKET_NUM:
                 buildMutableBucketNum();
                 break;
+            case OperationType.OP_MODIFY_ENABLE_LOAD_PROFILE:
+                buildEnableLoadProfile();
+                break;
             case OperationType.OP_MODIFY_BINLOG_CONFIG:
                 buildBinlogConfig();
                 break;
@@ -365,6 +373,7 @@ public class TableProperty implements Writable, GsonPostProcessable {
                 buildBinlogAvailableVersion();
                 break;
             case OperationType.OP_ALTER_TABLE_PROPERTIES:
+                buildPartitionTTL();
                 buildPartitionLiveNumber();
                 buildDataCachePartitionDuration();
                 buildLocation();
@@ -443,6 +452,13 @@ public class TableProperty implements Writable, GsonPostProcessable {
     public TableProperty buildPartitionTTL() {
         if (properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_TTL_NUMBER)) {
             partitionTTLNumber = Integer.parseInt(properties.get(PropertyAnalyzer.PROPERTIES_PARTITION_TTL_NUMBER));
+        }
+
+        if (properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_TTL)) {
+            Pair<String, PeriodDuration> ttlDuration = PropertyAnalyzer.analyzePartitionTTL(properties, false);
+            if (ttlDuration != null) {
+                partitionTTL = ttlDuration.second;
+            }
         }
         return this;
     }
@@ -646,6 +662,13 @@ public class TableProperty implements Writable, GsonPostProcessable {
     public TableProperty buildMutableBucketNum() {
         if (properties.get(PropertyAnalyzer.PROPERTIES_MUTABLE_BUCKET_NUM) != null) {
             mutableBucketNum = Long.parseLong(properties.get(PropertyAnalyzer.PROPERTIES_MUTABLE_BUCKET_NUM));
+        }
+        return this;
+    }
+
+    public TableProperty buildEnableLoadProfile() {
+        if (properties.get(PropertyAnalyzer.PROPERTIES_ENABLE_LOAD_PROFILE) != null) {
+            enableLoadProfile = Boolean.parseBoolean(properties.get(PropertyAnalyzer.PROPERTIES_ENABLE_LOAD_PROFILE));
         }
         return this;
     }
@@ -906,6 +929,10 @@ public class TableProperty implements Writable, GsonPostProcessable {
         return mutableBucketNum;
     }
 
+    public boolean enableLoadProfile() {
+        return enableLoadProfile;
+    }
+
     public String getStorageVolume() {
         return storageVolume;
     }
@@ -1022,6 +1049,7 @@ public class TableProperty implements Writable, GsonPostProcessable {
         buildPartitionLiveNumber();
         buildReplicatedStorage();
         buildBucketSize();
+        buildEnableLoadProfile();
         buildBinlogConfig();
         buildBinlogAvailableVersion();
         buildDataCachePartitionDuration();

@@ -50,6 +50,7 @@ import com.starrocks.catalog.Table;
 import com.starrocks.catalog.Table.TableType;
 import com.starrocks.catalog.TableProperty;
 import com.starrocks.catalog.View;
+import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
 import com.starrocks.common.ErrorCode;
 import com.starrocks.common.ErrorReport;
@@ -69,7 +70,6 @@ import com.starrocks.persist.ModifyPartitionInfo;
 import com.starrocks.persist.ModifyTablePropertyOperationLog;
 import com.starrocks.persist.RenameMaterializedViewLog;
 import com.starrocks.persist.SwapTableOperationLog;
-import com.starrocks.persist.gson.IForwardCompatibleObject;
 import com.starrocks.persist.metablock.SRMetaBlockEOFException;
 import com.starrocks.persist.metablock.SRMetaBlockException;
 import com.starrocks.persist.metablock.SRMetaBlockID;
@@ -187,7 +187,7 @@ public class AlterJobMgr {
                 throw e;
             }
         } finally {
-            locker.unLockDatabase(db, LockType.WRITE);
+            locker.unLockDatabase(db.getId(), LockType.WRITE);
         }
     }
 
@@ -254,10 +254,13 @@ public class AlterJobMgr {
             throw new SemanticException(String.format("number of columns changed: %d != %d",
                     existedColumns.size(), newColumns.size()));
         }
+
         for (int i = 0; i < existedColumns.size(); i++) {
             Column existed = existedColumns.get(i);
             Column created = newColumns.get(i);
-            if (!existed.isSchemaCompatible(created)) {
+            if (!isSchemaCompatible(existed, created)) {
+                LOG.warn("Active materialized view {} failed, column schema changed: {} != {}",
+                        materializedView.getName(), existed.toString(), created.toString());
                 String message = MaterializedViewExceptions.inactiveReasonForColumnNotCompatible(
                         existed.toString(), created.toString());
                 materializedView.setInactiveAndReason(message);
@@ -266,6 +269,36 @@ public class AlterJobMgr {
         }
 
         return createStmt.getQueryStatement();
+    }
+
+    /**
+     * Check if the schema of existed and created column is compatible, if not, return false
+     * @param existed mv's existed column
+     * @param created new mv's created column
+     */
+    private static boolean isSchemaCompatible(Column existed, Column created) {
+        if (Config.enable_active_materialized_view_schema_strict_check) {
+            return existed.isSchemaCompatible(created);
+        } else {
+            return isSchemaCompatibleInLoose(existed, created);
+        }
+    }
+
+    /**
+     * Check if the schema of existed and created column is compatible in loose mode
+     * @param t1 mv's existed column
+     * @param t2 new mv's created column
+     */
+    private static boolean isSchemaCompatibleInLoose(Column t1, Column t2) {
+        // check whether the column name are the same
+        if (!t1.getName().equalsIgnoreCase(t2.getName())) {
+            return false;
+        }
+        // check whether the column primitive type are the same
+        if (!t1.getType().getPrimitiveType().equals(t2.getType().getPrimitiveType())) {
+            return false;
+        }
+        return true;
     }
 
     public void replayAlterMaterializedViewBaseTableInfos(AlterMaterializedViewBaseTableInfosLog log) {
@@ -278,14 +311,14 @@ public class AlterJobMgr {
         }
 
         Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(mv.getId()), LockType.WRITE);
+        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(mv.getId()), LockType.WRITE);
         try {
             mv.replayAlterMaterializedViewBaseTableInfos(log);
         } catch (Throwable e) {
             LOG.warn("replay alter materialized-view status failed: {}", mv.getName(), e);
             mv.setInactiveAndReason("replay alter status failed: " + e.getMessage());
         } finally {
-            locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(mv.getId()), LockType.WRITE);
+            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(mv.getId()), LockType.WRITE);
         }
     }
 
@@ -300,14 +333,14 @@ public class AlterJobMgr {
         }
 
         Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(mv.getId()), LockType.WRITE);
+        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(mv.getId()), LockType.WRITE);
         try {
             alterMaterializedViewStatus(mv, log.getStatus(), true);
         } catch (Throwable e) {
             LOG.warn("replay alter materialized-view status failed: {}", mv.getName(), e);
             mv.setInactiveAndReason("replay alter status failed: " + e.getMessage());
         } finally {
-            locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(mv.getId()), LockType.WRITE);
+            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(mv.getId()), LockType.WRITE);
         }
     }
 
@@ -319,7 +352,7 @@ public class AlterJobMgr {
         MaterializedView oldMaterializedView = (MaterializedView) GlobalStateMgr.getCurrentState().getLocalMetastore()
                     .getTable(db.getId(), materializedViewId);
         if (oldMaterializedView != null) {
-            try (AutoCloseableLock ignore = new AutoCloseableLock(new Locker(), db,
+            try (AutoCloseableLock ignore = new AutoCloseableLock(new Locker(), db.getId(),
                     Lists.newArrayList(oldMaterializedView.getId()), LockType.WRITE)) {
                 db.dropTable(oldMaterializedView.getName());
                 oldMaterializedView.setName(newMaterializedViewName);
@@ -359,7 +392,7 @@ public class AlterJobMgr {
         }
 
         Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(oldMaterializedView.getId()), LockType.WRITE);
+        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(oldMaterializedView.getId()), LockType.WRITE);
         try {
             final MaterializedView.MvRefreshScheme newMvRefreshScheme = new MaterializedView.MvRefreshScheme();
             final MaterializedView.MvRefreshScheme oldRefreshScheme = oldMaterializedView.getRefreshScheme();
@@ -387,7 +420,7 @@ public class AlterJobMgr {
             LOG.warn("replay change materialized-view refresh scheme failed: {}",
                     oldMaterializedView.getName(), e);
         } finally {
-            locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(oldMaterializedView.getId()), LockType.WRITE);
+            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(oldMaterializedView.getId()), LockType.WRITE);
         }
     }
 
@@ -405,7 +438,7 @@ public class AlterJobMgr {
         }
 
         Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(mv.getId()), LockType.WRITE);
+        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(mv.getId()), LockType.WRITE);
         try {
             TableProperty tableProperty = mv.getTableProperty();
             if (tableProperty == null) {
@@ -419,7 +452,7 @@ public class AlterJobMgr {
             mv.setInactiveAndReason("replay failed: " + e.getMessage());
             LOG.warn("replay alter materialized-view properties failed: {}", mv.getName(), e);
         } finally {
-            locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(mv.getId()), LockType.WRITE);
+            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(mv.getId()), LockType.WRITE);
         }
     }
 
@@ -487,7 +520,7 @@ public class AlterJobMgr {
         View view = (View) GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getId(), tableId);
 
         Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(view.getId()), LockType.WRITE);
+        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(view.getId()), LockType.WRITE);
         try {
             String viewName = view.getName();
             view.setInlineViewDefWithSqlMode(inlineViewDef, alterViewInfo.getSqlMode());
@@ -505,7 +538,7 @@ public class AlterJobMgr {
 
             LOG.info("replay modify view[{}] definition to {}", viewName, inlineViewDef);
         } finally {
-            locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(view.getId()), LockType.WRITE);
+            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(view.getId()), LockType.WRITE);
         }
     }
 
@@ -515,7 +548,7 @@ public class AlterJobMgr {
                     .getTable(db.getId(), info.getTableId());
 
         Locker locker = new Locker();
-        locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(olapTable.getId()), LockType.WRITE);
+        locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(olapTable.getId()), LockType.WRITE);
         try {
             PartitionInfo partitionInfo = olapTable.getPartitionInfo();
             if (info.getDataProperty() != null) {
@@ -531,7 +564,7 @@ public class AlterJobMgr {
             }
             partitionInfo.setIsInMemory(info.getPartitionId(), info.isInMemory());
         } finally {
-            locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(olapTable.getId()), LockType.WRITE);
+            locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(olapTable.getId()), LockType.WRITE);
         }
     }
 
@@ -568,13 +601,7 @@ public class AlterJobMgr {
     }
 
     public void load(SRMetaBlockReader reader) throws IOException, SRMetaBlockException, SRMetaBlockEOFException {
-        int schemaChangeJobSize = reader.readInt();
-        for (int i = 0; i != schemaChangeJobSize; ++i) {
-            AlterJobV2 alterJobV2 = reader.readJson(AlterJobV2.class);
-            if (alterJobV2 instanceof IForwardCompatibleObject) {
-                LOG.warn("Ignore unknown alterJobV2(id: {}) from the future version!", alterJobV2.getJobId());
-                continue;
-            }
+        reader.readCollection(AlterJobV2.class, alterJobV2 -> {
             schemaChangeHandler.addAlterJobV2(alterJobV2);
 
             // ATTN : we just want to add tablet into TabletInvertedIndex when only PendingJob is checkpoint
@@ -584,15 +611,9 @@ public class AlterJobMgr {
                 alterJobV2.replay(alterJobV2);
                 LOG.info("replay pending alter job when load alter job {} ", alterJobV2.getJobId());
             }
-        }
+        });
 
-        int materializedViewJobSize = reader.readInt();
-        for (int i = 0; i != materializedViewJobSize; ++i) {
-            AlterJobV2 alterJobV2 = reader.readJson(AlterJobV2.class);
-            if (alterJobV2 instanceof IForwardCompatibleObject) {
-                LOG.warn("Ignore unknown MV job(id: {}) from the future version!", alterJobV2.getJobId());
-                continue;
-            }
+        reader.readCollection(AlterJobV2.class, alterJobV2 -> {
             materializedViewHandler.addAlterJobV2(alterJobV2);
 
             // ATTN : we just want to add tablet into TabletInvertedIndex when only PendingJob is checkpoint
@@ -602,6 +623,6 @@ public class AlterJobMgr {
                 alterJobV2.replay(alterJobV2);
                 LOG.info("replay pending alter job when load alter job {} ", alterJobV2.getJobId());
             }
-        }
+        });
     }
 }

@@ -61,16 +61,15 @@ public:
 
         _location_provider = std::make_unique<FixedLocationProvider>(kTestDir);
         _mem_tracker = std::make_unique<MemTracker>(1024 * 1024);
-        _update_manager = std::make_unique<lake::UpdateManager>(_location_provider.get(), _mem_tracker.get());
-        _tablet_manager =
-                std::make_unique<lake::TabletManager>(_location_provider.get(), _update_manager.get(), 1638400000);
+        _update_manager = std::make_unique<lake::UpdateManager>(_location_provider, _mem_tracker.get());
+        _tablet_manager = std::make_unique<lake::TabletManager>(_location_provider, _update_manager.get(), 1638400000);
     }
 
     void TearDown() { (void)FileSystem::Default()->delete_dir_recursive(kTestDir); }
 
 protected:
     constexpr static const char* const kTestDir = "./lake_meta_test";
-    std::unique_ptr<lake::LocationProvider> _location_provider;
+    std::shared_ptr<lake::LocationProvider> _location_provider;
     std::unique_ptr<TabletManager> _tablet_manager;
     std::unique_ptr<MemTracker> _mem_tracker;
     std::unique_ptr<UpdateManager> _update_manager;
@@ -124,8 +123,9 @@ TEST_F(MetaFileTest, test_delvec_rw) {
 
     // 3. read delvec
     DelVector after_delvec;
+    LakeIOOptions lake_io_opts;
     ASSIGN_OR_ABORT(auto metadata2, _tablet_manager->get_tablet_metadata(tablet_id, version));
-    EXPECT_TRUE(get_del_vec(_tablet_manager.get(), *metadata2, segment_id, true, &after_delvec).ok());
+    EXPECT_TRUE(get_del_vec(_tablet_manager.get(), *metadata2, segment_id, true, lake_io_opts, &after_delvec).ok());
     EXPECT_EQ(before_delvec, after_delvec.save());
 
     // 4. read meta
@@ -225,8 +225,9 @@ TEST_F(MetaFileTest, test_delvec_read_loop) {
 
         // 3. read delvec
         DelVector after_delvec;
+        LakeIOOptions lake_io_opts;
         ASSIGN_OR_ABORT(auto meta, _tablet_manager->get_tablet_metadata(tablet_id, version));
-        EXPECT_TRUE(get_del_vec(_tablet_manager.get(), *meta, segment_id, false, &after_delvec).ok());
+        EXPECT_TRUE(get_del_vec(_tablet_manager.get(), *meta, segment_id, false, lake_io_opts, &after_delvec).ok());
         EXPECT_EQ(before_delvec, after_delvec.save());
     };
     for (uint32_t segment_id = 1000; segment_id < 1200; segment_id++) {
@@ -340,16 +341,22 @@ TEST_F(MetaFileTest, test_dcg) {
         EXPECT_TRUE(pdcgs.size() == 1);
         auto idx = pdcgs[0]->get_column_idx(3);
         EXPECT_TRUE("tmp/ddd.cols" == pdcgs[0]->column_files("tmp")[idx.first]);
+        EXPECT_TRUE("tmp/ddd.cols" == pdcgs[0]->column_file_by_idx("tmp", idx.first).value());
         idx = pdcgs[0]->get_column_idx(4);
         EXPECT_TRUE("tmp/ccc.cols" == pdcgs[0]->column_files("tmp")[idx.first]);
+        EXPECT_TRUE("tmp/ccc.cols" == pdcgs[0]->column_file_by_idx("tmp", idx.first).value());
         idx = pdcgs[0]->get_column_idx(5);
         EXPECT_TRUE("tmp/ddd.cols" == pdcgs[0]->column_files("tmp")[idx.first]);
+        EXPECT_TRUE("tmp/ddd.cols" == pdcgs[0]->column_file_by_idx("tmp", idx.first).value());
         idx = pdcgs[0]->get_column_idx(6);
         EXPECT_TRUE("tmp/bbb.cols" == pdcgs[0]->column_files("tmp")[idx.first]);
+        EXPECT_TRUE("tmp/bbb.cols" == pdcgs[0]->column_file_by_idx("tmp", idx.first).value());
         idx = pdcgs[0]->get_column_idx(7);
         EXPECT_TRUE("tmp/ccc.cols" == pdcgs[0]->column_files("tmp")[idx.first]);
+        EXPECT_TRUE("tmp/ccc.cols" == pdcgs[0]->column_file_by_idx("tmp", idx.first).value());
         idx = pdcgs[0]->get_column_idx(8);
         EXPECT_TRUE("tmp/bbb.cols" == pdcgs[0]->column_files("tmp")[idx.first]);
+        EXPECT_TRUE("tmp/bbb.cols" == pdcgs[0]->column_file_by_idx("tmp", idx.first).value());
     }
     // 4. compact (conflict)
     {

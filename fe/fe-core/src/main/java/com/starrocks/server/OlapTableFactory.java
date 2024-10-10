@@ -27,7 +27,6 @@ import com.starrocks.catalog.Database;
 import com.starrocks.catalog.DistributionInfo;
 import com.starrocks.catalog.ExpressionRangePartitionInfo;
 import com.starrocks.catalog.ExternalOlapTable;
-import com.starrocks.catalog.ForeignKeyConstraint;
 import com.starrocks.catalog.HashDistributionInfo;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.ListPartitionInfo;
@@ -39,7 +38,8 @@ import com.starrocks.catalog.RangePartitionInfo;
 import com.starrocks.catalog.SinglePartitionInfo;
 import com.starrocks.catalog.Table;
 import com.starrocks.catalog.TableIndexes;
-import com.starrocks.catalog.UniqueConstraint;
+import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.AnalysisException;
 import com.starrocks.common.Config;
 import com.starrocks.common.DdlException;
@@ -413,6 +413,10 @@ public class OlapTableFactory implements AbstractTableFactory {
                 throw new DdlException(e.getMessage());
             }
 
+            if (PropertyAnalyzer.analyzeBooleanProp(properties, PropertyAnalyzer.PROPERTIES_ENABLE_LOAD_PROFILE, false)) {
+                table.setEnableLoadProfile(true);
+            }
+
             // write quorum
             try {
                 table.setWriteQuorum(PropertyAnalyzer.analyzeWriteQuorum(properties));
@@ -622,6 +626,17 @@ public class OlapTableFactory implements AbstractTableFactory {
             if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_LIVE_NUMBER)) {
                 partitionLiveNumber = PropertyAnalyzer.analyzePartitionLiveNumber(properties, true);
                 table.setPartitionLiveNumber(partitionLiveNumber);
+            }
+
+            // analyze partition ttl duration
+            Pair<String, PeriodDuration> ttlDuration = null;
+            if (properties != null && properties.containsKey(PropertyAnalyzer.PROPERTIES_PARTITION_TTL)) {
+                ttlDuration = PropertyAnalyzer.analyzePartitionTTL(properties, true);
+                if (ttlDuration == null) {
+                    throw new DdlException("Invalid partition ttl duration");
+                }
+                table.getTableProperty().getProperties().put(PropertyAnalyzer.PROPERTIES_PARTITION_TTL, ttlDuration.first);
+                table.getTableProperty().setPartitionTTL(ttlDuration.second);
             }
 
             try {

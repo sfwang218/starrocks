@@ -86,6 +86,7 @@ import com.starrocks.common.ErrorReport;
 import com.starrocks.common.MetaNotFoundException;
 import com.starrocks.common.Pair;
 import com.starrocks.common.PatternMatcher;
+import com.starrocks.common.SchemaConstants;
 import com.starrocks.common.proc.BackendsProcDir;
 import com.starrocks.common.proc.ComputeNodeProcDir;
 import com.starrocks.common.proc.FrontendsProcNode;
@@ -307,7 +308,7 @@ public class ShowExecutor {
             List<MaterializedView> materializedViews = Lists.newArrayList();
             List<Pair<OlapTable, MaterializedIndexMeta>> singleTableMVs = Lists.newArrayList();
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockDatabase(db.getId(), LockType.READ);
             try {
                 PatternMatcher matcher = null;
                 if (statement.getPattern() != null) {
@@ -379,7 +380,7 @@ public class ShowExecutor {
                 LOG.warn("listMaterializedViews failed:", e);
                 throw e;
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
         }
 
@@ -475,7 +476,7 @@ public class ShowExecutor {
             MetaUtils.checkDbNullAndReport(db, statement.getDb());
 
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockDatabase(db.getId(), LockType.READ);
             try {
                 List<String> tableNames = GlobalStateMgr.getCurrentState().getMetadataMgr().listTableNames(catalogName, dbName);
 
@@ -509,7 +510,7 @@ public class ShowExecutor {
                     tableMap.put(tableName, table.getMysqlType());
                 }
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
 
             for (Map.Entry<String, String> entry : tableMap.entrySet()) {
@@ -547,7 +548,7 @@ public class ShowExecutor {
             MetaUtils.checkDbNullAndReport(db, showTemporaryTableStmt.getDb());
 
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockDatabase(db.getId(), LockType.READ);
             try {
                 TemporaryTableMgr temporaryTableMgr = GlobalStateMgr.getCurrentState().getTemporaryTableMgr();
                 List<String> tableNames = temporaryTableMgr.listTemporaryTables(sessionId, db.getId());
@@ -558,7 +559,7 @@ public class ShowExecutor {
                     rows.add(Lists.newArrayList(tableName));
                 }
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
 
             for (Map.Entry<String, String> entry : tableMap.entrySet()) {
@@ -574,7 +575,7 @@ public class ShowExecutor {
             ZoneId currentTimeZoneId = TimeUtils.getTimeZone().toZoneId();
             if (db != null) {
                 Locker locker = new Locker();
-                locker.lockDatabase(db, LockType.READ);
+                locker.lockDatabase(db.getId(), LockType.READ);
                 try {
                     PatternMatcher matcher = null;
                     if (statement.getPattern() != null) {
@@ -641,7 +642,7 @@ public class ShowExecutor {
                         rows.add(row);
                     }
                 } finally {
-                    locker.unLockDatabase(db, LockType.READ);
+                    locker.unLockDatabase(db.getId(), LockType.READ);
                 }
             }
             return new ShowResultSet(statement.getMetaData(), rows);
@@ -701,7 +702,7 @@ public class ShowExecutor {
             MetaUtils.checkDbNullAndReport(db, showStmt.getDb());
             List<List<String>> rows = Lists.newArrayList();
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockDatabase(db.getId(), LockType.READ);
             try {
                 Table table = MetaUtils.getSessionAwareTable(connectContext, db, showStmt.getTbl());
                 if (table == null) {
@@ -768,7 +769,7 @@ public class ShowExecutor {
                     return new ShowResultSet(showStmt.getMetaData(), rows);
                 }
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
         }
 
@@ -965,7 +966,8 @@ public class ShowExecutor {
                 matcher = PatternMatcher.createMysqlPattern(statement.getPattern(),
                         CaseSensibility.VARIABLES.getCaseSensibility());
             }
-            List<List<String>> rows = VariableMgr.dump(statement.getType(), context.getSessionVariable(), matcher);
+            List<List<String>> rows = GlobalStateMgr.getCurrentState().getVariableMgr().dump(statement.getType(),
+                    context.getSessionVariable(), matcher);
             return new ShowResultSet(statement.getMetaData(), rows);
         }
 
@@ -988,7 +990,7 @@ public class ShowExecutor {
             }
 
             Locker locker = new Locker();
-            locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
+            locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(table.getId()), LockType.READ);
             try {
                 PatternMatcher matcher = null;
                 if (statement.getPattern() != null) {
@@ -1002,8 +1004,8 @@ public class ShowExecutor {
                     }
                     final String columnName = col.getName();
                     final String columnType = col.getType().canonicalName().toLowerCase();
-                    final String isAllowNull = col.isAllowNull() ? "YES" : "NO";
-                    final String isKey = col.isKey() ? "YES" : "NO";
+                    final String isAllowNull = col.isAllowNull() ? SchemaConstants.YES : SchemaConstants.NO;
+                    final String isKey = col.isKey() ? SchemaConstants.YES : SchemaConstants.NO;
                     String defaultValue = null;
                     if (!col.getType().isOnlyMetricType()) {
                         defaultValue = col.getMetaDefaultValue(Lists.newArrayList());
@@ -1033,7 +1035,7 @@ public class ShowExecutor {
                     }
                 }
             } finally {
-                locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
+                locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(table.getId()), LockType.READ);
             }
             return new ShowResultSet(statement.getMetaData(), rows);
         }
@@ -1354,7 +1356,7 @@ public class ShowExecutor {
                 ErrorReport.reportSemanticException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
             }
             Locker locker = new Locker();
-            locker.lockDatabase(db, LockType.READ);
+            locker.lockDatabase(db.getId(), LockType.READ);
             try {
                 String tableName = statement.getTableName();
                 List<List<String>> totalRows = statement.getResultRows();
@@ -1494,7 +1496,7 @@ public class ShowExecutor {
             } catch (AnalysisException e) {
                 throw new SemanticException(e.getMessage());
             } finally {
-                locker.unLockDatabase(db, LockType.READ);
+                locker.unLockDatabase(db.getId(), LockType.READ);
             }
             return new ShowResultSet(statement.getMetaData(), statement.getResultRows());
         }
@@ -1574,7 +1576,7 @@ public class ShowExecutor {
                     dbName = db.getFullName();
 
                     Locker locker = new Locker();
-                    locker.lockDatabase(db, LockType.READ);
+                    locker.lockDatabase(db.getId(), LockType.READ);
                     try {
                         Table table = GlobalStateMgr.getCurrentState().getLocalMetastore().getTable(db.getId(), tableId);
                         if (!(table instanceof OlapTable)) {
@@ -1631,7 +1633,7 @@ public class ShowExecutor {
                         }
 
                     } finally {
-                        locker.unLockDatabase(db, LockType.READ);
+                        locker.unLockDatabase(db.getId(), LockType.READ);
                     }
                 } while (false);
 
@@ -1646,7 +1648,7 @@ public class ShowExecutor {
                 MetaUtils.checkDbNullAndReport(db, statement.getDbName());
 
                 Locker locker = new Locker();
-                locker.lockDatabase(db, LockType.READ);
+                locker.lockDatabase(db.getId(), LockType.READ);
                 try {
                     Table table = MetaUtils.getSessionAwareTable(
                             context, db, new TableName(statement.getDbName(), statement.getTableName()));
@@ -1751,7 +1753,7 @@ public class ShowExecutor {
                         rows.add(oneTablet);
                     }
                 } finally {
-                    locker.unLockDatabase(db, LockType.READ);
+                    locker.unLockDatabase(db.getId(), LockType.READ);
                 }
             }
 
@@ -2085,7 +2087,7 @@ public class ShowExecutor {
             Database db = context.getGlobalStateMgr().getLocalMetastore().getDb(statement.getDb());
             if (db != null) {
                 Locker locker = new Locker();
-                locker.lockDatabase(db, LockType.READ);
+                locker.lockDatabase(db.getId(), LockType.READ);
                 try {
                     for (Table tbl : GlobalStateMgr.getCurrentState().getLocalMetastore().getTables(db.getId())) {
                         if (!(tbl instanceof OlapTable)) {
@@ -2137,7 +2139,7 @@ public class ShowExecutor {
                                 String.valueOf(dynamicPartitionScheduler.isInScheduler(db.getId(), olapTable.getId()))));
                     }
                 } finally {
-                    locker.unLockDatabase(db, LockType.READ);
+                    locker.unLockDatabase(db.getId(), LockType.READ);
                 }
                 return new ShowResultSet(statement.getMetaData(), rows);
             }
@@ -2157,7 +2159,7 @@ public class ShowExecutor {
             }
 
             Locker locker = new Locker();
-            locker.lockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
+            locker.lockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(table.getId()), LockType.READ);
             try {
                 if (table instanceof OlapTable) {
                     List<Index> indexes = ((OlapTable) table).getIndexes();
@@ -2173,7 +2175,7 @@ public class ShowExecutor {
                     // do nothing
                 }
             } finally {
-                locker.unLockTablesWithIntensiveDbLock(db, Lists.newArrayList(table.getId()), LockType.READ);
+                locker.unLockTablesWithIntensiveDbLock(db.getId(), Lists.newArrayList(table.getId()), LockType.READ);
             }
             return new ShowResultSet(statement.getMetaData(), rows);
         }
@@ -2278,8 +2280,8 @@ public class ShowExecutor {
                     if (result != null) {
                         rows.add(result);
                     }
-                } catch (MetaNotFoundException e) {
-                    // pass
+                } catch (Exception e) {
+                    // The catalog(HMS/Glue...) may can not connected, so the meta can not be found. Just ignore it.
                 }
             }
 

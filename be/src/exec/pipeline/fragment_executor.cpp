@@ -142,6 +142,10 @@ Status FragmentExecutor::_prepare_query_ctx(ExecEnv* exec_env, const UnifiedExec
     }
     _query_ctx->set_query_trace(std::make_shared<starrocks::debug::QueryTrace>(query_id, enable_query_trace));
 
+    if (request.common().__isset.exec_stats_node_ids) {
+        _query_ctx->init_node_exec_stats(request.common().exec_stats_node_ids);
+    }
+
     return Status::OK();
 }
 
@@ -177,12 +181,12 @@ Status FragmentExecutor::_prepare_fragment_ctx(const UnifiedExecPlanFragmentPara
 Status FragmentExecutor::_prepare_workgroup(const UnifiedExecPlanFragmentParams& request) {
     WorkGroupPtr wg;
     if (!request.common().__isset.workgroup || request.common().workgroup.id == WorkGroup::DEFAULT_WG_ID) {
-        wg = WorkGroupManager::instance()->get_default_workgroup();
+        wg = ExecEnv::GetInstance()->workgroup_manager()->get_default_workgroup();
     } else if (request.common().workgroup.id == WorkGroup::DEFAULT_MV_WG_ID) {
-        wg = WorkGroupManager::instance()->get_default_mv_workgroup();
+        wg = ExecEnv::GetInstance()->workgroup_manager()->get_default_mv_workgroup();
     } else {
         wg = std::make_shared<WorkGroup>(request.common().workgroup);
-        wg = WorkGroupManager::instance()->add_workgroup(wg);
+        wg = ExecEnv::GetInstance()->workgroup_manager()->add_workgroup(wg);
     }
     DCHECK(wg != nullptr);
 
@@ -232,8 +236,13 @@ Status FragmentExecutor::_prepare_runtime_state(ExecEnv* exec_env, const Unified
             spill_mem_limit_ratio = query_options.spill_mem_limit_threshold;
         }
     }
+
+    int scan_node_number = 1;
+    if (query_globals.__isset.scan_node_number) {
+        scan_node_number = query_globals.scan_node_number;
+    }
     _query_ctx->init_mem_tracker(option_query_mem_limit, parent_mem_tracker, big_query_mem_limit, spill_mem_limit_ratio,
-                                 wg.get(), runtime_state);
+                                 wg.get(), runtime_state, scan_node_number);
 
     auto query_mem_tracker = _query_ctx->mem_tracker();
     SCOPED_THREAD_LOCAL_MEM_TRACKER_SETTER(query_mem_tracker.get());
@@ -594,12 +603,13 @@ bool FragmentExecutor::_is_in_colocate_exec_group(PlanNodeId plan_node_id) {
     return false;
 }
 
-void create_adaptive_group_initialize_events(RuntimeState* state, PipelineGroupMap&& unready_pipeline_groups) {
+static void create_adaptive_group_initialize_events(RuntimeState* state, WorkGroup* wg,
+                                                    PipelineGroupMap&& unready_pipeline_groups) {
     if (unready_pipeline_groups.empty()) {
         return;
     }
 
-    auto* driver_executor = state->exec_env()->wg_driver_executor();
+    auto* driver_executor = wg->executors()->driver_executor();
     for (auto& [leader_source_op, pipelines] : unready_pipeline_groups) {
         EventPtr group_initialize_event =
                 Event::create_collect_stats_source_initialize_event(driver_executor, std::move(pipelines));
@@ -677,7 +687,7 @@ Status FragmentExecutor::_prepare_pipeline_driver(ExecEnv* exec_env, const Unifi
     });
 
     if (!unready_pipeline_groups.empty()) {
-        create_adaptive_group_initialize_events(runtime_state, std::move(unready_pipeline_groups));
+        create_adaptive_group_initialize_events(runtime_state, _wg.get(), std::move(unready_pipeline_groups));
     }
 
     // Acquire driver token to avoid overload
@@ -828,7 +838,7 @@ Status FragmentExecutor::execute(ExecEnv* exec_env) {
     prepare_success = true;
 
     DCHECK(_fragment_ctx->enable_resource_group());
-    auto* executor = exec_env->wg_driver_executor();
+    auto* executor = _wg->executors()->driver_executor();
     RETURN_IF_ERROR(_fragment_ctx->submit_active_drivers(executor));
 
     return Status::OK();
@@ -845,6 +855,36 @@ void FragmentExecutor::_fail_cleanup(bool fragment_has_registed) {
         }
         _query_ctx->count_down_fragments();
     }
+}
+
+Status FragmentExecutor::append_incremental_scan_ranges(ExecEnv* exec_env, const TExecPlanFragmentParams& request) {
+    DCHECK(!request.__isset.fragment);
+    DCHECK(request.__isset.params);
+    const TPlanFragmentExecParams& params = request.params;
+    const TUniqueId& query_id = params.query_id;
+    const TUniqueId& instance_id = params.fragment_instance_id;
+
+    QueryContextPtr query_ctx = exec_env->query_context_mgr()->get(query_id);
+    if (query_ctx == nullptr) return Status::OK();
+    FragmentContextPtr fragment_ctx = query_ctx->fragment_mgr()->get(instance_id);
+    if (fragment_ctx == nullptr) return Status::OK();
+
+    for (const auto& [node_id, scan_ranges] : params.per_node_scan_ranges) {
+        auto iter = fragment_ctx->morsel_queue_factories().find(node_id);
+        if (iter == fragment_ctx->morsel_queue_factories().end()) {
+            continue;
+        }
+        MorselQueueFactory* morsel_queue_factory = iter->second.get();
+        if (morsel_queue_factory == nullptr) {
+            continue;
+        }
+
+        pipeline::Morsels morsels;
+        bool has_more_morsel = false;
+        pipeline::ScanMorsel::build_scan_morsels(node_id, scan_ranges, true, &morsels, &has_more_morsel);
+        RETURN_IF_ERROR(morsel_queue_factory->append_morsels(std::move(morsels), has_more_morsel));
+    }
+    return Status::OK();
 }
 
 } // namespace starrocks::pipeline

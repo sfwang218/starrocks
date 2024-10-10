@@ -93,6 +93,7 @@ Status Rowset::load() {
     // if the state is ROWSET_UNLOADING it means close() is called
     // and the rowset is already loaded, and the resource is not closed yet.
     if (_rowset_state_machine.rowset_state() == ROWSET_LOADED) {
+        warmup_lrucache();
         return Status::OK();
     }
     // after lock, if rowset state is ROWSET_UNLOADING, it is ok to return
@@ -192,6 +193,16 @@ Status Rowset::do_load() {
     }
 #endif
     return Status::OK();
+}
+
+void Rowset::warmup_lrucache() {
+#ifndef BE_TEST
+    if (config::metadata_cache_memory_limit_percent > 0 && _keys_type != PRIMARY_KEYS) {
+        // Move this item to newest item in lru cache.
+        // ONLY support non-pk table now.
+        MetadataCache::instance()->warmup_rowset(this);
+    }
+#endif
 }
 
 // this function is only used for partial update so far
@@ -708,6 +719,9 @@ Status Rowset::get_segment_iterators(const Schema& schema, const RowsetReadOptio
     seg_options.runtime_range_pruner = options.runtime_range_pruner;
     seg_options.column_access_paths = options.column_access_paths;
     seg_options.tablet_schema = options.tablet_schema;
+    seg_options.use_vector_index = options.use_vector_index;
+    seg_options.vector_search_option = options.vector_search_option;
+
     if (options.delete_predicates != nullptr) {
         seg_options.delete_predicates = options.delete_predicates->get_predicates(end_version());
     }

@@ -31,14 +31,14 @@ import com.starrocks.analysis.JoinOperator;
 import com.starrocks.catalog.Column;
 import com.starrocks.catalog.DistributionInfo;
 import com.starrocks.catalog.ExpressionRangePartitionInfo;
-import com.starrocks.catalog.ForeignKeyConstraint;
 import com.starrocks.catalog.HashDistributionInfo;
 import com.starrocks.catalog.KeysType;
 import com.starrocks.catalog.MaterializedView;
 import com.starrocks.catalog.OlapTable;
 import com.starrocks.catalog.PartitionInfo;
 import com.starrocks.catalog.Table;
-import com.starrocks.catalog.UniqueConstraint;
+import com.starrocks.catalog.constraint.ForeignKeyConstraint;
+import com.starrocks.catalog.constraint.UniqueConstraint;
 import com.starrocks.common.Pair;
 import com.starrocks.common.profile.Tracers;
 import com.starrocks.common.util.SRStringUtils;
@@ -468,7 +468,7 @@ public class MaterializedViewRewriter implements IMaterializedViewRewriter {
             }
         }
         return table.hasUniqueConstraints() && table.getUniqueConstraints().stream().anyMatch(
-                uniqueConstraint -> columnNames.containsAll(uniqueConstraint.getUniqueColumnNames()));
+                uniqueConstraint -> columnNames.containsAll(uniqueConstraint.getUniqueColumnNames(table)));
     }
 
     private boolean isSupportedPredicate(
@@ -917,7 +917,7 @@ public class MaterializedViewRewriter implements IMaterializedViewRewriter {
      * @return: ForeignKeyConstraint list associated with the child, empty list if no FK constraint.
      */
     private List<Pair<Table, ForeignKeyConstraint>> getForeignKeyConstraint(TableScanDesc mvTableScanDesc,
-                                                               MaterializedView mv) {
+                                                                            MaterializedView mv) {
         List<Pair<Table, ForeignKeyConstraint>> foreignKeyConstraints = Lists.newArrayList();
         Table mvChildTable = mvTableScanDesc.getTable();
         if (mvChildTable.getForeignKeyConstraints() != null) {
@@ -2036,7 +2036,7 @@ public class MaterializedViewRewriter implements IMaterializedViewRewriter {
     private OptExpression pushdownPredicatesForJoin(OptExpression optExpression, ScalarOperator predicate) {
         if (!(optExpression.getOp() instanceof LogicalJoinOperator)) {
             if (predicate != null) {
-                // predicate can not be pushdown, we should add it it optExpression
+                // predicate cannot be pushdown, we should add it optExpression
                 Operator.Builder builder = OperatorBuilderFactory.build(optExpression.getOp());
                 builder.withOperator(optExpression.getOp());
                 PredicateSplit predicateSplit = PredicateSplit.splitPredicate(
@@ -2681,7 +2681,7 @@ public class MaterializedViewRewriter implements IMaterializedViewRewriter {
     private Map<Table, Set<Integer>> getTableToRelationid(
             OptExpression optExpression, ColumnRefFactory refFactory, List<Table> tableList) {
         Map<Table, Set<Integer>> tableToRelationId = Maps.newHashMap();
-        List<ColumnRefOperator> validColumnRefs = MvUtils.collectScanColumn(optExpression);
+        Set<ColumnRefOperator> validColumnRefs = MvUtils.collectScanColumn(optExpression);
         for (Map.Entry<ColumnRefOperator, Table> entry : refFactory.getColumnRefToTable().entrySet()) {
             if (!tableList.contains(entry.getValue())) {
                 continue;
