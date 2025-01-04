@@ -1729,15 +1729,39 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
     RETURN_IF_COLUMNS_ONLY_NULL(columns);
 
     size_t chunk_size = columns[0]->size();
-    Column* src_column = ColumnHelper::unpack_and_duplicate_const_column(chunk_size, columns[0]).get();
+
+    // Special handle const column
+    if (columns[0]->is_constant()) {
+        LOG(INFO) << "xxxxxxxxx: columns[0]->is_constant()";
+        auto* const_column = down_cast<ConstColumn*>(columns[0].get());
+        // 剥茧抽丝
+        ArrayColumn* const_array = down_cast<ArrayColumn*>(const_column->mutable_data_column()->get());
+        DCHECK(const_array->elements_column()->is_array());
+        auto [array_null, elements, offsets] = unpack_array_column(const_array->elements_column());
+        ColumnPtr result_elements = elements->clone_empty();
+        auto result_offsets = UInt32Column::create();
+        result_offsets->append(0);
+        for (size_t i = 0; i < const_array->size(); i++) {
+            Datum v = const_array->get(i);
+            if (!v.is_null()) {
+                const auto& items = v.get<DatumArray>();
+                for (const auto& item : items) {
+                    result_elements->append_datum(item);
+                }
+            }
+            result_offsets->append(result_elements->size());
+        }
+
+        return ConstColumn::create(ArrayColumn::create(result_elements, result_offsets), chunk_size);
+    }
 
     const NullableColumn* src_nullable_column = nullptr;
     ArrayColumn* array_column = nullptr;
     if (columns[0]->is_nullable()) {
-        src_nullable_column = down_cast<const NullableColumn*>(src_column);
+        src_nullable_column = down_cast<const NullableColumn*>(columns[0].get());
         array_column = down_cast<ArrayColumn*>(src_nullable_column->data_column().get());
     } else {
-        array_column = down_cast<ArrayColumn*>(src_column);
+        array_column = down_cast<ArrayColumn*>(columns[0].get());
     }
 
     DCHECK(array_column->elements_column()->is_array());
