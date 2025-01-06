@@ -1741,7 +1741,7 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
         return std::make_pair(result_elements, result_offsets);
     };
 
-    // Helper function to process a single array
+    // Helper function to process a single array item
     auto process_items = [](const Datum& v, ColumnPtr& result_elements, ColumnPtr& result_offsets) {
         if (!v.is_null()) {
             const auto& items = v.get<DatumArray>();
@@ -1754,7 +1754,7 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
                 }
             }
         }
-        result_offsets->append(result_elements->size() - initial_size);
+        result_offsets->append(result_elements->size());
     };
 
     // Special handle const column
