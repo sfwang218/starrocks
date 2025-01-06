@@ -1741,17 +1741,20 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
         ColumnPtr result_elements = elements->clone_empty();
         auto result_offsets = UInt32Column::create();
         result_offsets->append(0);
-        for (size_t i = 0; i < const_array->size(); i++) {
-            Datum v = const_array->get(i);
-            if (!v.is_null()) {
-                const auto& items = v.get<DatumArray>();
-                for (const auto& item : items) {
-                    result_elements->append_datum(item);
+
+        Datum v = const_array->get(0);
+        if (!v.is_null()) {
+            const auto& items = v.get<DatumArray>();
+            for (const auto& item : items) {
+                if (!item.is_null()) {
+                    const auto& sub_items = item.get<DatumArray>();
+                    for (const auto& sub_item : sub_items) {
+                        result_elements->append_datum(sub_item);
+                    }
                 }
             }
-            result_offsets->append(result_elements->size());
         }
-
+        result_offsets->append(result_elements->size());
         return ConstColumn::create(ArrayColumn::create(result_elements, result_offsets), chunk_size);
     }
 
