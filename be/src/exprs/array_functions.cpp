@@ -1730,19 +1730,19 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
 
     size_t chunk_size = columns[0]->size();
 
-    // Special handle const column
-    if (columns[0]->is_constant()) {
-        LOG(INFO) << "xxxxxxxxx: columns[0]->is_constant()";
-        auto* const_column = down_cast<ConstColumn*>(columns[0].get());
-        // 剥茧抽丝
-        ArrayColumn* const_array = down_cast<ArrayColumn*>(const_column->mutable_data_column()->get());
-        DCHECK(const_array->elements_column()->is_array());
-        auto [array_null, elements, offsets] = unpack_array_column(const_array->elements_column());
+    // Helper function to init result array column elements
+    auto init_result_array_elements = [](const ColumnPtr& elements_column, size_t offsets_size) {
+        DCHECK(elements_column->is_array());
+        auto [array_null, elements, offsets] = unpack_array_column(elements_column);
         ColumnPtr result_elements = elements->clone_empty();
         auto result_offsets = UInt32Column::create();
+        result_offsets->reserve(offsets_size);
         result_offsets->append(0);
+        return std::make_pair(result_elements, result_offsets);
+    };
 
-        Datum v = const_array->get(0);
+    // Helper function to process a single array
+    auto process_items = [](const Datum& v, ColumnPtr& result_elements, ColumnPtr& result_offsets) {
         if (!v.is_null()) {
             const auto& items = v.get<DatumArray>();
             for (const auto& item : items) {
@@ -1754,7 +1754,19 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
                 }
             }
         }
-        result_offsets->append(result_elements->size());
+        result_offsets->append(result_elements->size() - initial_size);
+    };
+
+    // Special handle const column
+    if (columns[0]->is_constant()) {
+        LOG(INFO) << "xxxxxxxxx: columns[0]->is_constant()";
+        auto* const_column = down_cast<ConstColumn*>(columns[0].get());
+        ArrayColumn* const_array = down_cast<ArrayColumn*>(const_column->mutable_data_column()->get());
+
+        auto [result_elements, result_offsets] = init_result_array_elements(const_array->elements_column(), 1);
+
+        Datum v = const_array->get(0);
+        process_items(v, result_elements, result_offsets);
         return ConstColumn::create(ArrayColumn::create(result_elements, result_offsets), chunk_size);
     }
 
@@ -1767,27 +1779,10 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
         array_column = down_cast<ArrayColumn*>(columns[0].get());
     }
 
-    DCHECK(array_column->elements_column()->is_array());
-    auto [array_null, elements, offsets] = unpack_array_column(array_column->elements_column());
-    ColumnPtr result_elements = elements->clone_empty();
-    auto result_offsets = UInt32Column::create();
-    result_offsets->reserve(array_column->offsets().size());
-    result_offsets->append(0);
-
+    auto [result_elements, result_offsets] = init_result_array_elements(array_column->elements_column(), array_column->offsets().size());
     for (size_t i = 0; i < chunk_size; i++) {
         Datum v = array_column->get(i);
-        if (!v.is_null()) {
-            const auto& items = v.get<DatumArray>();
-            for (const auto& item : items) {
-                if (!item.is_null()) {
-                    const auto& sub_items = item.get<DatumArray>();
-                    for (const auto& sub_item : sub_items) {
-                        result_elements->append_datum(sub_item);
-                    }
-                }
-            }
-        }
-        result_offsets->append(result_elements->size());
+        process_items(v, result_elements, result_offsets);
     }
 
     auto result = ArrayColumn::create(result_elements, result_offsets);
