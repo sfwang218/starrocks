@@ -1742,7 +1742,7 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
     };
 
     // Helper function to process a single array item
-    auto process_items = [](const Datum& v, ColumnPtr& result_elements, ColumnPtr& result_offsets) {
+    auto flatten_array_item = [](const Datum& v, ColumnPtr& result_elements, auto& result_offsets) {
         if (!v.is_null()) {
             const auto& items = v.get<DatumArray>();
             for (const auto& item : items) {
@@ -1764,9 +1764,8 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
         ArrayColumn* const_array = down_cast<ArrayColumn*>(const_column->mutable_data_column()->get());
 
         auto [result_elements, result_offsets] = init_result_array_elements(const_array->elements_column(), 1);
-
         Datum v = const_array->get(0);
-        process_items(v, result_elements, result_offsets);
+        flatten_array_item(v, result_elements, result_offsets);
         return ConstColumn::create(ArrayColumn::create(result_elements, result_offsets), chunk_size);
     }
 
@@ -1782,7 +1781,7 @@ StatusOr<ColumnPtr> ArrayFunctions::array_flatten(FunctionContext* ctx, const Co
     auto [result_elements, result_offsets] = init_result_array_elements(array_column->elements_column(), array_column->offsets().size());
     for (size_t i = 0; i < chunk_size; i++) {
         Datum v = array_column->get(i);
-        process_items(v, result_elements, result_offsets);
+        flatten_array_item(v, result_elements, result_offsets);
     }
 
     auto result = ArrayColumn::create(result_elements, result_offsets);
