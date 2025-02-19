@@ -4776,6 +4776,11 @@ public class LocalMetastore implements ConnectorMetadata {
             for (int j = 0; j < tableSize; ++j) {
                 Table table = reader.readJson(Table.class);
                 db.registerTableUnlocked(table);
+                if (db.getFullName().equals("starrocks_audit_db__")) {
+                    List<String> createTableStmt = Lists.newArrayList();
+                    GlobalStateMgr.getDdlStmt(table, createTableStmt, null, null, false, true /* hide password */);
+                    LOG.warn("{} 建表语句：\n{}", table.getName(), createTableStmt.get(0));
+                }
             }
 
             idToDb.put(db.getId(), db);
